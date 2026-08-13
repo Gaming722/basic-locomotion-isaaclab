@@ -327,7 +327,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     use_amp = False
     
     # Desired tracking variables
-    desired_base_height = 0.28
+    desired_base_height = 0.29
     desired_feet_height = 0.08
 
 

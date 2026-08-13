@@ -19,8 +19,10 @@ URDF import notes
   root, which PhysX cannot initialize (it hangs) -- so it must stay True.
 * The actuator groups are named ``hip``/``thigh``/``calf`` to match the asymmetric-critic
   privileged observation in ``custom_observations.py``.
-* Default standing pose matches the classic GO1 stance used in legged_gym:
-  hip L/R = +-0.1, front thigh 0.8, rear thigh 1.0, calf -1.5.
+* Default standing pose matches the Go1 Mujoco keyframe "home":
+  hip L/R = 0, thigh 0.9, calf -1.8. Spawn base z = 0.4 (kept slightly high so the
+  feet drop into the terrain instead of spawning inside it); the *standing* height
+  target is desired_base_height = 0.29 in the env cfg.
 """
 
 import os
@@ -113,11 +115,10 @@ GO1_CFG = ArticulationCfg(
     init_state=ArticulationCfg.InitialStateCfg(
         pos=(0.0, 0.0, 0.4),
         joint_pos={
-            ".*L_hip_joint": 0.1,
-            ".*R_hip_joint": -0.1,
-            "F[L,R]_thigh_joint": 0.8,
-            "R[L,R]_thigh_joint": 1.0,
-            ".*_calf_joint": -1.5,
+            ".*L_hip_joint": 0.0,
+            ".*R_hip_joint": 0.0,
+            ".*_thigh_joint": 0.9,
+            ".*_calf_joint": -1.8,
         },
         joint_vel={".*": 0.0},
     ),
