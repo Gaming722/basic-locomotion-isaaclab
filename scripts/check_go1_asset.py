@@ -54,6 +54,33 @@ def main():
     print("-" * 60)
     print(f"default_joint_pos (env 0): {robot.data.default_joint_pos[0].tolist()}")
 
+    # MERGE VERIFICATION: with merge_fixed_joints=True, the mass-bearing *_foot links
+    # (0.06 kg, with collision) must survive as distinct bodies, keep their mass, and
+    # keep their frame at the leg tip. A buggy merge would (a) drop them (find_bodies
+    # returns empty), (b) fold their mass into the calf, or (c) leave a stale/offset
+    # frame so body_pos_w[foot] points at the calf.
+    print("=" * 60)
+    print("MERGE VERIFICATION (fixed joints / foot links / masses)")
+    feet = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
+    calfs = ["FL_calf", "FR_calf", "RL_calf", "RR_calf"]
+    foot_ix, foot_names = robot.find_bodies(feet, preserve_order=True)
+    calf_ix, calf_names = robot.find_bodies(calfs, preserve_order=True)
+    foot_pos = robot.data.body_pos_w[0, foot_ix]
+    calf_pos = robot.data.body_pos_w[0, calf_ix]
+    print("  foot world pos:")
+    for n, p in zip(foot_names, foot_pos):
+        print(f"    {n:8s} xyz=({p[0]:+.3f}, {p[1]:+.3f}, {p[2]:+.3f})")
+    print("  calf world pos:")
+    for n, p in zip(calf_names, calf_pos):
+        print(f"    {n:8s} xyz=({p[0]:+.3f}, {p[1]:+.3f}, {p[2]:+.3f})")
+    dz = foot_pos[:, 2] - calf_pos[:, 2]
+    print(f"  foot_z - calf_z = {[f'{d:+.3f}' for d in dz]}   (all must be negative: feet below calf)")
+    total_mass = robot.data.default_mass[0].sum().item()
+    print(f"  total body mass = {total_mass:.4f} kg   (URDF sum = 11.3100 -> merge must conserve mass)")
+    if "base" in robot.data.body_names:
+        bix = robot.data.body_names.index("base")
+        print(f"  'base' (merged trunk) mass = {robot.data.default_mass[0, bix].item():.4f} kg   (expect ~4.801 = 4.8 trunk + 0.001 imu)")
+
     # Verify the names the locomotion framework depends on.
     print("=" * 60)
     required_bodies = ["base", "FL_foot", "FR_foot", "RL_foot", "RR_foot",
