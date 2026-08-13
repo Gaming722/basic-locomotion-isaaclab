@@ -290,6 +290,19 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
 
+    # viewer: camera tracks a walking robot close-up (same as m1-perceptive-baseline).
+    # origin_type="asset_root" makes the ViewportCameraController follow the robot root
+    # every render step. envs 0-499 are the fixed command-zero envs (stand still), so
+    # follow env 500 (the first that actually receives a velocity command).
+    viewer: ViewerCfg = ViewerCfg(
+        eye=(-3.0, 1.2, 1.8),
+        lookat=(0.0, 0.0, 0.35),
+        origin_type="asset_root",
+        asset_name="robot",
+        env_index=500,
+        resolution=(1280, 720),
+    )
+
     # events
     events: EventCfg = EventCfg()
 
