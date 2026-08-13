@@ -328,7 +328,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     
     # Desired tracking variables
     desired_base_height = 0.29
-    desired_feet_height = 0.08
+    desired_feet_height = 0.05  # aligned with Aliengo
 
 
     # Desired clip actions
@@ -361,14 +361,14 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
 
 
     # Feet reward scale
-    feet_air_time_reward_scale = 0.25
+    feet_air_time_reward_scale = 0.25 * 0.0  # aligned with Aliengo
     feet_air_time_variance_reward_scale = -1.0*0.0
 
     feet_height_clearance_aperiodic_reward_scale = 0.25*0.0  
-    feet_height_clearance_periodic_reward_scale = 0.25*0.0
+    feet_height_clearance_periodic_reward_scale = 0.25  # aligned with Aliengo
     
     feet_height_clearance_mujoco_aperiodic_reward_scale = 0.25*0.0
-    feet_height_clearance_mujoco_periodic_reward_scale = 0.25
+    feet_height_clearance_mujoco_periodic_reward_scale = 0.25*0.0  # aligned with Aliengo
     
     feet_slide_reward_scale = -0.25*0.0
     
@@ -382,17 +382,17 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     feet_edge_radius_px = 0
     visualize_edge_map = False
 
-    feet_vertical_surface_contacts_reward_scale = -2.5
+    feet_vertical_surface_contacts_reward_scale = -0.25  # aligned with Aliengo
 
 
     # Contact suggestion reward scale
-    periodic_contact_suggestion_reward_scale = 0.5
+    periodic_contact_suggestion_reward_scale = 0.25  # aligned with Aliengo
     # Desired step freq and duty factor (if periodic gait contact suggestion is used)
     desired_step_freq = 1.4
     desired_duty_factor = 0.65
     desired_phase_offset = [0.0, 0.5, 0.5, 0.0] #FL, FR, RL, RR
 
-    stance_contact_suggestion_reward_scale = 1.0
+    stance_contact_suggestion_reward_scale = 0.25  # aligned with Aliengo
 
 
 
