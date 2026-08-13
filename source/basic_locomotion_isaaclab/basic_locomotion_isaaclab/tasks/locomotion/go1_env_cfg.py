@@ -19,7 +19,6 @@ from isaaclab.envs import ViewerCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.sensors import ImuCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelWithAdditiveBiasCfg
 
 from basic_locomotion_isaaclab.assets.go1_asset import GO1_CFG
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
@@ -295,16 +294,10 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     events: EventCfg = EventCfg()
 
 
-    # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
-    action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
-        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="abs"),
-    )
-    # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
-    observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.02, operation="add"),
-        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.001, operation="abs"),
-    )
+    # Oracle teacher: no action/observation noise. Robustness (depth noise, action delay)
+    # is introduced on the student side during distillation, not on the teacher.
+    action_noise_model = None
+    observation_noise_model = None
 
     # robot
     robot: ArticulationCfg = GO1_CFG.replace(prim_path="/World/envs/env_.*/Robot")
