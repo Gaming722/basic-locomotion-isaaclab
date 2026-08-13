@@ -396,54 +396,12 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
 
 
 
-import isaaclab.terrains as terrain_gen
-from isaaclab.terrains.terrain_generator_cfg import TerrainGeneratorCfg
+from .rough_terrains import COMMON_ROUGH_TERRAINS_CFG, GO1_ROUGH_TERRAINS_CFG
 @configclass
 class Go1RoughBlindEnvCfg(Go1FlatEnvCfg):
 
-    ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
-        curriculum=True,
-        size=(8.0, 8.0),
-        border_width=20.0,
-        num_rows=10,
-        num_cols=20,
-        horizontal_scale=0.1,
-        vertical_scale=0.005,
-        slope_threshold=0.75,
-        use_cache=False,
-        sub_terrains={
-            "flat": terrain_gen.MeshPlaneTerrainCfg(
-                proportion=0.2
-            ),
-            "discrete_obstacles_terrain": terrain_gen.MeshRepeatedBoxesTerrainCfg(
-                proportion=0.2,         
-                abs_height_noise=(-0.05, 0.05),
-                object_params_start=terrain_gen.MeshRepeatedBoxesTerrainCfg.ObjectCfg(
-                    num_objects=40, height=0.10, size=(0.6, 0.6), max_yx_angle=0.0, degrees=True
-                ),
-                object_params_end=terrain_gen.MeshRepeatedBoxesTerrainCfg.ObjectCfg(
-                    num_objects=40, height=0.25, size=(1.2, 1.2), max_yx_angle=0.0, degrees=True
-                ),platform_width=2.0,
-            ),
-            "random_rough": terrain_gen.HfRandomUniformTerrainCfg(
-                proportion=0.1, noise_range=(0.02, 0.06), noise_step=0.02, border_width=0.25
-            ),
-            "hf_pyramid_slope": terrain_gen.HfPyramidSlopedTerrainCfg(
-                proportion=0.1, slope_range=(0.2, 0.4), platform_width=2.0, border_width=0.25
-            ),
-            "hf_pyramid_slope_inv": terrain_gen.HfInvertedPyramidSlopedTerrainCfg(
-                proportion=0.1, slope_range=(0.2, 0.4), platform_width=2.0, border_width=0.25
-            ),
-            "pyramid_stairs": terrain_gen.MeshPyramidStairsTerrainCfg(
-                proportion=0.2, step_height_range=(0.05, 0.13), step_width=0.3,
-                platform_width=3.0, border_width=1.0, holes=False,
-            ),
-            "pyramid_stairs_inv": terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
-                proportion=0.2, step_height_range=(0.05, 0.13), step_width=0.3,
-                platform_width=3.0, border_width=1.0, holes=False,
-            ),
-        },
-    )
+    ROUGH_TERRAINS_CFG = COMMON_ROUGH_TERRAINS_CFG  # aligned with Aliengo
+    # switch back to the original GO1 curriculum terrain with: ROUGH_TERRAINS_CFG = GO1_ROUGH_TERRAINS_CFG
 
     """Rough terrains configuration."""
     terrain = TerrainImporterCfg(
