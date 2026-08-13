@@ -85,6 +85,40 @@ gym.register(
 )
 
 
+# Go1 environments
+from .locomotion_env import Go1FlatEnvCfg, Go1RoughVisionEnvCfg, Go1RoughBlindEnvCfg
+
+gym.register(
+    id="Locomotion-Go1-Flat",
+    entry_point=LocomotionEnv,
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": Go1FlatEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Locomotion-Go1-Rough-Blind",
+    entry_point=LocomotionEnv,
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": Go1RoughBlindEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:RoughPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Locomotion-Go1-Rough-Vision",
+    entry_point=LocomotionEnv,
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": Go1RoughVisionEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:RoughPPORunnerCfg",
+    },
+)
+
+
 # B2 environments
 from .locomotion_env import B2FlatEnvCfg, B2RoughVisionEnvCfg, B2RoughBlindEnvCfg
 
