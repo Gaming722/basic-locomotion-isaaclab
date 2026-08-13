@@ -39,6 +39,9 @@ GO1_URDF = os.path.join(GO1_ROOT, "urdf", "go1.urdf")
 # Nominal PD gains (from legged_gym go1_config): no identified actuator model yet.
 GO1_STIFFNESS = 30.0  # N m / rad
 GO1_DAMPING = 0.6  # N m s / rad
+# Motor rotor inertia added to joint-space inertia (matches Aliengo's identified DCMotor).
+# Not yet identified for GO1; keeps joint response from being unrealistically light.
+GO1_ARMATURE = 0.01  # kg m^2
 # Placeholder command latency (physics steps), randomized per-env at reset. Mirrors
 # Go2's PaceDCMotor max_delay=2 and the m1-perceptive go1 (max_delay=2).
 GO1_MIN_DELAY = 0
@@ -57,6 +60,7 @@ GO1_HIP_ACTUATOR_CFG = DelayedPDActuatorCfg(
     velocity_limit=30.1,
     stiffness=GO1_STIFFNESS,
     damping=GO1_DAMPING,
+    armature=GO1_ARMATURE,
     min_delay=GO1_MIN_DELAY,
     max_delay=GO1_MAX_DELAY,
 )
@@ -67,6 +71,7 @@ GO1_THIGH_ACTUATOR_CFG = DelayedPDActuatorCfg(
     velocity_limit=30.1,
     stiffness=GO1_STIFFNESS,
     damping=GO1_DAMPING,
+    armature=GO1_ARMATURE,
     min_delay=GO1_MIN_DELAY,
     max_delay=GO1_MAX_DELAY,
 )
@@ -77,6 +82,7 @@ GO1_CALF_ACTUATOR_CFG = DelayedPDActuatorCfg(
     velocity_limit=20.06,
     stiffness=GO1_STIFFNESS,
     damping=GO1_DAMPING,
+    armature=GO1_ARMATURE,
     min_delay=GO1_MIN_DELAY,
     max_delay=GO1_MAX_DELAY,
 )
