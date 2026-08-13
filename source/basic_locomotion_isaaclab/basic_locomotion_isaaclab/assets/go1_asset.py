@@ -103,7 +103,9 @@ GO1_CFG = ArticulationCfg(
             max_depenetration_velocity=1.0,
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=True,
+            # Disable self-collision: the URDF's thigh/calf collision boxes overlap during
+            # normal leg motion and produce spurious contacts (legged_gym also disables it).
+            enabled_self_collisions=False,
             solver_position_iteration_count=4,
             solver_velocity_iteration_count=0,
         ),

@@ -26,6 +26,12 @@ def main():
     print("STEP: spawning articulation...", flush=True)
     with use_stage(sim.get_initial_stage()):
         robot = Articulation(GO1_CFG.replace(prim_path="/World/go1"))
+    # ArticulationRootAPI lives on the root *link* prim (base), not the spawn prim.
+    import omni.usd
+    from pxr import PhysxSchema
+    stage = omni.usd.get_context().get_stage()
+    api = PhysxSchema.PhysxArticulationAPI(stage.GetPrimAtPath("/World/go1/base"))
+    print(f"enabled_self_collisions: {api.GetEnabledSelfCollisionsAttr().Get()}", flush=True)
     print("STEP: sim.reset()...", flush=True)
     sim.reset()
     print("STEP: robot.reset()...", flush=True)
