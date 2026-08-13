@@ -1528,23 +1528,28 @@
     </inertial>
   </link>
   <!-- =================================================================================== -->
-  <!-- RealSense D435 depth camera (visualization only).                                -->
-  <!-- DAGGER's synthetic depth-camera sensor mounts on the base body with an offset;   -->
-  <!-- this mesh just shows where the camera sits.                                      -->
+  <!-- RealSense D435 depth camera (visualization + mount reference).                    -->
+  <!-- d435_joint defines the MOUNT pose (trunk -> bottom screw mount): the 3D-printed   -->
+  <!-- bracket only has to realize this trunk<->screw-mount relative pose.               -->
+  <!-- d435_link_joint is the fixed d435-internal offset (screw mount -> camera body).   -->
   <!-- =================================================================================== -->
+  <link name="d435_bottom_screw_frame"/>
+  <joint name="d435_joint" type="fixed">
+    <origin rpy="0 0.5235987755982988 0" xyz="0.28 0.0 0.08"/>
+    <parent link="trunk"/>
+    <child link="d435_bottom_screw_frame"/>
+  </joint>
+  <joint name="d435_link_joint" type="fixed">
+    <origin xyz="0.0106 0.0175 0.0125" rpy="0 0 0"/>
+    <parent link="d435_bottom_screw_frame"/>
+    <child link="d435_link"/>
+  </joint>
   <link name="d435_link">
     <visual>
-      <!-- xyz folds in the macro's link_joint offset (0.0106, 0.0175, 0.0125) so the mesh
-           stays centered: 0.0043+0.0106, -0.0175+0.0175, 0+0.0125 -->
-      <origin xyz="0.0149 0.0 0.0125" rpy="1.5707963267948966 0 1.5707963267948966"/>
+      <origin xyz="0.0043 -0.0175 0" rpy="1.5707963267948966 0 1.5707963267948966"/>
       <geometry>
         <mesh filename="../meshes/d435.dae" scale="1 1 1"/>
       </geometry>
     </visual>
   </link>
-  <joint name="d435_joint" type="fixed">
-    <origin rpy="0 0.5235987755982988 0" xyz="0.28 0.0 0.08"/>
-    <parent link="trunk"/>
-    <child link="d435_link"/>
-  </joint>
 </robot>
