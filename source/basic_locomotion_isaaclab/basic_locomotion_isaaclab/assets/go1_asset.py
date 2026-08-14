@@ -38,7 +38,11 @@ GO1_URDF = os.path.join(GO1_ROOT, "urdf", "go1.urdf")
 
 # Nominal PD gains (from legged_gym go1_config): no identified actuator model yet.
 GO1_STIFFNESS = 30.0  # N m / rad
-GO1_DAMPING = 0.6  # N m s / rad
+# Damping raised 0.6 -> 2.0 to match Aliengo's identified-motor damping level.
+# The low 0.6 value let GO1's joints flail easily and learn a degenerate fast
+# back-leg-only ("wheelbarrow") gait; higher damping makes that solution harder
+# and the joint response closer to Aliengo. Dynamics change -> requires a fresh run.
+GO1_DAMPING = 2.0  # N m s / rad
 # Motor rotor inertia added to joint-space inertia (matches Aliengo's identified DCMotor).
 # Not yet identified for GO1; keeps joint response from being unrealistically light.
 GO1_ARMATURE = 0.01  # kg m^2
