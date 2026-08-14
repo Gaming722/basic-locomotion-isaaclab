@@ -29,6 +29,15 @@ python scripts/rsl_rl/train.py --task=Locomotion-Aliengo-Flat --num_envs=4096 --
 python scripts/rsl_rl/train.py --task=Locomotion-Aliengo-Rough-Blind --num_envs=4096 --headless
 ```
 
+- GO1 teacher (heightmap-based, used as the DAgger expert):
+
+```bash
+python scripts/rsl_rl/train.py --task=Locomotion-Go1-Rough-Vision --num_envs=4096 --headless
+```
+
+- GO1 DAgger student env (TiledCamera depth, for the train_dagger_go1.py pipeline):
+  see `scripts/dagger/README_dagger.md`.
+
 - To test the policy, you can press:
 ```bash
 python scripts/rsl_rl/play.py --task=Locomotion-Aliengo-Flat --num_envs=16
