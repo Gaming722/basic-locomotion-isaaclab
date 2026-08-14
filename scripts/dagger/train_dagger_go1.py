@@ -29,6 +29,8 @@ parser.add_argument("--dual_pane", action="store_true", default=False,
                     help="Record side-by-side video: left = Isaac Sim view, right = live grayscale depth.")
 parser.add_argument("--follow_env", type=int, default=600,
                     help="Env index the camera/depth pane follow. GO1 envs 0-499 are command-zero (stand still); follow >=500.")
+parser.add_argument("--terrain", type=str, default="rough",
+                    help="Tiled env terrain: rough | stairs | slope | flat (e.g. --terrain stairs to record stair climbing).")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
@@ -370,6 +372,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg.obs_groups = {"policy": ["teacher_obs"], "critic": ["teacher_obs"]}
 
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    env_cfg.terrain_type = args_cli.terrain
+    env_cfg.rebuild_terrain()  # __post_init__ already ran at hydra parse; rebuild with the CLI terrain
     if args_cli.depth_history_length <= 0:
         raise ValueError("--depth_history_length must be positive.")
     if args_cli.dagger_train_every <= 0:

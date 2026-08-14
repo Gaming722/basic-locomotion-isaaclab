@@ -17,6 +17,7 @@ from isaaclab.sensors import (
 from isaaclab.sim import SimulationCfg, PhysxCfg
 from isaaclab.envs import ViewerCfg
 from isaaclab.terrains import TerrainImporterCfg
+import isaaclab.terrains as terrain_gen
 from isaaclab.terrains.terrain_generator_cfg import TerrainGeneratorCfg
 from isaaclab.sensors import ImuCfg
 from isaaclab.utils import configclass
@@ -529,18 +530,53 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
     expert can label student states during DAgger. Requires --enable_cameras at launch.
     """
 
+    # Terrain composition for the Tiled env. "rough" = teacher's GO1_ROUGH mix;
+    # "stairs" / "slope" / "flat" select a single terrain type (handy for recording,
+    # e.g. --terrain stairs to capture stair climbing).
+    terrain_type: str = "rough"
+
     def __post_init__(self) -> None:
         super().__post_init__()
-        # Same terrain distribution as the teacher (GO1_ROUGH: obstacles + stairs +
-        # slopes, curriculum), but enlarged to 46x46 so every env gets its own 8x8 m
-        # sub-terrain (8 m spacing >> 2 m far clip keeps the rendered depth from seeing
-        # a neighbour robot). Must rebuild the generator instead of mutating the shared
-        # GO1_ROUGH_TERRAINS_CFG (the teacher's Go1RoughBlindEnvCfg references it).
-        # curriculum must stay False here: with enforce_env_spacing (one robot fixed per
-        # sub-terrain) the terrain curriculum's update_env_origins would move envs to
-        # random sub-terrains -> overlaps/out-of-bounds -> physics crashes. Same rough
-        # sub-terrain distribution as the teacher, just fixed difficulty (like the
-        # reference M1/Aliengo Tiled envs).
+        self.rebuild_terrain()
+        self.scene.num_envs = min(self.scene.num_envs, 46 * 46)
+
+    def rebuild_terrain(self) -> None:
+        """(Re)build the terrain generator from ``terrain_type``.
+
+        Called from ``__post_init__`` and from the dagger script after ``terrain_type``
+        is overridden at runtime (config __post_init__ runs at hydra parse time, before
+        the dagger CLI can set terrain_type). Must rebuild the generator instead of
+        mutating the shared GO1_ROUGH_TERRAINS_CFG (the teacher's Go1RoughBlindEnvCfg
+        references it). curriculum stays False: with enforce_env_spacing (one robot fixed
+        per sub-terrain) the curriculum's update_env_origins would move envs to random
+        sub-terrains -> overlaps -> physics crashes (matches reference M1/Aliengo Tiled).
+        """
+        if self.terrain_type == "rough":
+            sub_terrains = GO1_ROUGH_TERRAINS_CFG.sub_terrains
+        elif self.terrain_type == "flat":
+            sub_terrains = {"flat": terrain_gen.MeshPlaneTerrainCfg(proportion=1.0)}
+        elif self.terrain_type == "stairs":
+            sub_terrains = {
+                "pyramid_stairs": terrain_gen.MeshPyramidStairsTerrainCfg(
+                    proportion=0.5, step_height_range=(0.05, 0.18), step_width=0.3,
+                    platform_width=3.0, border_width=1.0, holes=False,
+                ),
+                "pyramid_stairs_inv": terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
+                    proportion=0.5, step_height_range=(0.05, 0.18), step_width=0.3,
+                    platform_width=3.0, border_width=1.0, holes=False,
+                ),
+            }
+        elif self.terrain_type == "slope":
+            sub_terrains = {
+                "hf_pyramid_slope": terrain_gen.HfPyramidSlopedTerrainCfg(
+                    proportion=0.5, slope_range=(0.2, 0.4), platform_width=2.0, border_width=0.25
+                ),
+                "hf_pyramid_slope_inv": terrain_gen.HfInvertedPyramidSlopedTerrainCfg(
+                    proportion=0.5, slope_range=(0.2, 0.4), platform_width=2.0, border_width=0.25
+                ),
+            }
+        else:
+            raise ValueError(f"Unknown terrain_type: {self.terrain_type}")
         self.terrain.terrain_generator = TerrainGeneratorCfg(
             curriculum=False,
             size=GO1_ROUGH_TERRAINS_CFG.size,
@@ -551,9 +587,8 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
             vertical_scale=GO1_ROUGH_TERRAINS_CFG.vertical_scale,
             slope_threshold=GO1_ROUGH_TERRAINS_CFG.slope_threshold,
             use_cache=GO1_ROUGH_TERRAINS_CFG.use_cache,
-            sub_terrains=GO1_ROUGH_TERRAINS_CFG.sub_terrains,
+            sub_terrains=sub_terrains,
         )
-        self.scene.num_envs = min(self.scene.num_envs, 46 * 46)
         if not self.use_lin_vel_obs:
             # base_lin_vel excluded -> single obs space and the history buffer shrink by 3.
             self.single_observation_space = self.single_observation_space - 3
