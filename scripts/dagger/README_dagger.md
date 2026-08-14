@@ -17,6 +17,24 @@ python scripts/rsl_rl/train.py --task=Locomotion-Go1-Rough-Vision --num_envs=409
 The teacher's latest checkpoint is used as the DAgger expert (e.g. run `11-47-38`,
 `model_7999.pt`).
 
+### Finetune / resume the teacher
+
+Continue training from an existing checkpoint. A **new** timestamped log dir is
+created, so the original run is not overwritten.
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task=Locomotion-Go1-Rough-Vision \
+  --num_envs=4096 --headless \
+  --resume=True \
+  --load_run=2026-08-14_11-47-38 --checkpoint=model_7999.pt
+```
+
+Notes:
+- `--resume` is `type=bool`, so write `--resume=True` (not a bare `--resume`).
+- `--checkpoint=last` auto-picks the newest checkpoint in `--load_run`.
+- Changed reward/terrain configs apply when resuming — only the weights are loaded.
+
 ## 2. Run DAgger (student distillation)
 
 ```bash

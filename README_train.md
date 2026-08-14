@@ -35,6 +35,9 @@ python scripts/rsl_rl/train.py --task=Locomotion-Aliengo-Rough-Blind --num_envs=
 python scripts/rsl_rl/train.py --task=Locomotion-Go1-Rough-Vision --num_envs=4096 --headless
 ```
 
+  To continue / finetune from a checkpoint, add `--resume=True --load_run=<run> --checkpoint=model_<N>.pt`
+  (details in `scripts/dagger/README_dagger.md`).
+
 - GO1 DAgger student env (TiledCamera depth, for the train_dagger_go1.py pipeline):
   see `scripts/dagger/README_dagger.md`.
 
