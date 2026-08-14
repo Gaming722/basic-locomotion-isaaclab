@@ -536,8 +536,13 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
         # sub-terrain (8 m spacing >> 2 m far clip keeps the rendered depth from seeing
         # a neighbour robot). Must rebuild the generator instead of mutating the shared
         # GO1_ROUGH_TERRAINS_CFG (the teacher's Go1RoughBlindEnvCfg references it).
+        # curriculum must stay False here: with enforce_env_spacing (one robot fixed per
+        # sub-terrain) the terrain curriculum's update_env_origins would move envs to
+        # random sub-terrains -> overlaps/out-of-bounds -> physics crashes. Same rough
+        # sub-terrain distribution as the teacher, just fixed difficulty (like the
+        # reference M1/Aliengo Tiled envs).
         self.terrain.terrain_generator = TerrainGeneratorCfg(
-            curriculum=GO1_ROUGH_TERRAINS_CFG.curriculum,
+            curriculum=False,
             size=GO1_ROUGH_TERRAINS_CFG.size,
             border_width=GO1_ROUGH_TERRAINS_CFG.border_width,
             num_rows=46,
@@ -575,8 +580,8 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
         prim_path="/World/envs/env_.*/Robot/base/d435",
         update_period=1 / 60,
         offset=TiledCameraCfg.OffsetCfg(
-            pos=(0.23, 0.0, 0.10),
-            rot=(-0.405579, 0.579228, -0.579228, 0.405579),
+            pos=(0.26, 0.0, 0.12),  # URDF d435_joint mount (x=0.26, z=0.12)
+            rot=(-0.353553, 0.612372, -0.612372, 0.353553),  # 30 deg down + upright image (w,x,y,z)
             convention="ros",
         ),
         spawn=sim_utils.PinholeCameraCfg(

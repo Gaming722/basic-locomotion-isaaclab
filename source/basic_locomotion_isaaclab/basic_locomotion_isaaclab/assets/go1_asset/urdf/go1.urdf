@@ -1535,7 +1535,7 @@
   <!-- =================================================================================== -->
   <link name="d435_bottom_screw_frame"/>
   <joint name="d435_joint" type="fixed">
-    <origin rpy="0 0.5235987755982988 0" xyz="0.23 0.0 0.10"/>
+    <origin rpy="0 0.5235987755982988 0" xyz="0.26 0.0 0.12"/>
     <parent link="trunk"/>
     <child link="d435_bottom_screw_frame"/>
   </joint>
