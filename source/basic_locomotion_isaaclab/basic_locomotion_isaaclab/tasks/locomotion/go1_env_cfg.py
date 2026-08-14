@@ -17,7 +17,6 @@ from isaaclab.sensors import (
 from isaaclab.sim import SimulationCfg, PhysxCfg
 from isaaclab.envs import ViewerCfg
 from isaaclab.terrains import TerrainImporterCfg
-import isaaclab.terrains as terrain_gen
 from isaaclab.terrains.terrain_generator_cfg import TerrainGeneratorCfg
 from isaaclab.sensors import ImuCfg
 from isaaclab.utils import configclass
@@ -532,19 +531,22 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        # One robot per 8x8 m sub-terrain so the rendered depth never sees a neighbour
-        # robot (8 m spacing >> 2 m far clip). Large flat grid for the first DAgger run.
+        # Same terrain distribution as the teacher (GO1_ROUGH: obstacles + stairs +
+        # slopes, curriculum), but enlarged to 46x46 so every env gets its own 8x8 m
+        # sub-terrain (8 m spacing >> 2 m far clip keeps the rendered depth from seeing
+        # a neighbour robot). Must rebuild the generator instead of mutating the shared
+        # GO1_ROUGH_TERRAINS_CFG (the teacher's Go1RoughBlindEnvCfg references it).
         self.terrain.terrain_generator = TerrainGeneratorCfg(
-            curriculum=False,
-            size=(8.0, 8.0),
-            border_width=20.0,
+            curriculum=GO1_ROUGH_TERRAINS_CFG.curriculum,
+            size=GO1_ROUGH_TERRAINS_CFG.size,
+            border_width=GO1_ROUGH_TERRAINS_CFG.border_width,
             num_rows=46,
             num_cols=46,
-            horizontal_scale=0.1,
-            vertical_scale=0.005,
-            slope_threshold=0.75,
-            use_cache=False,
-            sub_terrains={"flat": terrain_gen.MeshPlaneTerrainCfg(proportion=1.0)},
+            horizontal_scale=GO1_ROUGH_TERRAINS_CFG.horizontal_scale,
+            vertical_scale=GO1_ROUGH_TERRAINS_CFG.vertical_scale,
+            slope_threshold=GO1_ROUGH_TERRAINS_CFG.slope_threshold,
+            use_cache=GO1_ROUGH_TERRAINS_CFG.use_cache,
+            sub_terrains=GO1_ROUGH_TERRAINS_CFG.sub_terrains,
         )
         self.scene.num_envs = min(self.scene.num_envs, 46 * 46)
         if not self.use_lin_vel_obs:
