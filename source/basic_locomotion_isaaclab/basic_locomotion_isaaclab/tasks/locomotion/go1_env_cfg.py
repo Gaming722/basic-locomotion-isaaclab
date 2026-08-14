@@ -539,6 +539,10 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
         super().__post_init__()
         self.rebuild_terrain()
         self.scene.num_envs = min(self.scene.num_envs, 46 * 46)
+        if not self.use_lin_vel_obs:
+            # base_lin_vel excluded -> single obs space and the history buffer shrink by 3.
+            self.single_observation_space = self.single_observation_space - 3
+            self.observation_space = self.single_observation_space * self.history_length
 
     def rebuild_terrain(self) -> None:
         """(Re)build the terrain generator from ``terrain_type``.
@@ -589,10 +593,6 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
             use_cache=GO1_ROUGH_TERRAINS_CFG.use_cache,
             sub_terrains=sub_terrains,
         )
-        if not self.use_lin_vel_obs:
-            # base_lin_vel excluded -> single obs space and the history buffer shrink by 3.
-            self.single_observation_space = self.single_observation_space - 3
-            self.observation_space = self.single_observation_space * self.history_length
 
     use_lin_vel_obs = False       # student obs: no base_lin_vel (real robot has no odometry)
     emit_teacher_obs = True       # emit teacher_obs (sim base_lin_vel + heightmap) for the expert
