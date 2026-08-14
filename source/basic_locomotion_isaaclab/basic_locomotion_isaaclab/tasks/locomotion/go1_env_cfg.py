@@ -328,7 +328,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     
     # Desired tracking variables
     desired_base_height = 0.29
-    desired_feet_height = 0.05  # aligned with Aliengo
+    desired_feet_height = 0.08  # raised from 0.05 (Aliengo alignment): GO1's shorter legs need more swing clearance
 
 
     # Desired clip actions
@@ -408,8 +408,9 @@ from .rough_terrains import COMMON_ROUGH_TERRAINS_CFG, GO1_ROUGH_TERRAINS_CFG
 @configclass
 class Go1RoughBlindEnvCfg(Go1FlatEnvCfg):
 
-    ROUGH_TERRAINS_CFG = COMMON_ROUGH_TERRAINS_CFG  # aligned with Aliengo
-    # switch back to the original GO1 curriculum terrain with: ROUGH_TERRAINS_CFG = GO1_ROUGH_TERRAINS_CFG
+    # Original GO1 curriculum terrain (curriculum=True, discrete obstacles + more
+    # stairs). Switch to COMMON_ROUGH_TERRAINS_CFG to match Aliengo's terrain.
+    ROUGH_TERRAINS_CFG = GO1_ROUGH_TERRAINS_CFG
 
     """Rough terrains configuration."""
     terrain = TerrainImporterCfg(
