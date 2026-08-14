@@ -169,7 +169,18 @@ class LocomotionEnv(DirectRLEnv):
         self._feet_contact_sensor_ids, _ = self._contact_sensor.find_bodies(["FL_foot", "FR_foot", "RL_foot", "RR_foot"], preserve_order=True)
         self._hip_contact_sensor_ids, _ = self._contact_sensor.find_bodies(["FL_hip", "FR_hip", "RL_hip", "RR_hip"], preserve_order=True)
         self._thigh_contact_sensor_ids, _ = self._contact_sensor.find_bodies(["FL_thigh", "FR_thigh", "RL_thigh", "RR_thigh"], preserve_order=True)
-        self._undesired_contact_body_ids = self._base_contact_sensor_id + self._hip_contact_sensor_ids + self._thigh_contact_sensor_ids
+        # Undesired-contact body set is per-robot configurable (GO1 penalizes calf
+        # ground drag). Default matches the previous hardcoded base + hips + thighs.
+        undesired_names = getattr(self.cfg, "undesired_contact_body_names", None)
+        if undesired_names is None:
+            undesired_names = (
+                ["base"]
+                + ["FL_hip", "FR_hip", "RL_hip", "RR_hip"]
+                + ["FL_thigh", "FR_thigh", "RL_thigh", "RR_thigh"]
+            )
+        self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(
+            undesired_names, preserve_order=True
+        )
 
         
         self._feet_ids_robot, _ = self._robot.find_bodies(["FL_foot", "FR_foot", "RL_foot", "RR_foot"], preserve_order=True)

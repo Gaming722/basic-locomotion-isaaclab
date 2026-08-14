@@ -356,6 +356,14 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     
     # Undesired contacts reward scale
     undersired_contact_reward_scale = -1.0
+    # GO1 penalizes calf contacts too, so the shin doesn't drag on the ground.
+    # Other robots keep the default undesired-contact set (base + hips + thighs).
+    undesired_contact_body_names = [
+        "base",
+        "FL_hip", "FR_hip", "RL_hip", "RR_hip",
+        "FL_thigh", "FR_thigh", "RL_thigh", "RR_thigh",
+        "FL_calf", "FR_calf", "RL_calf", "RR_calf",
+    ]
     action_rate_reward_scale = -0.01
     action_smoothness_reward_scale = -0.001
 
