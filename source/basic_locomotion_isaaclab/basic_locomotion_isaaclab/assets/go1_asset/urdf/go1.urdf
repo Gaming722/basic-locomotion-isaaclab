@@ -1545,11 +1545,16 @@
     <child link="d435_link"/>
   </joint>
   <link name="d435_link">
+    <!-- D435 camera body visual. Commented out: it sits exactly at the depth camera's
+         mount, so the rendered depth saw the camera's own housing as a big near-field
+         blob (white in the depth image). Uncomment if you need the D435 body in renders. -->
+    <!--
     <visual>
       <origin xyz="0.0043 -0.0175 0" rpy="1.5707963267948966 0 1.5707963267948966"/>
       <geometry>
         <mesh filename="../meshes/d435.dae" scale="1 1 1"/>
       </geometry>
     </visual>
+    -->
   </link>
 </robot>

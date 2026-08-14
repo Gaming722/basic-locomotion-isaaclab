@@ -31,6 +31,9 @@ parser.add_argument("--follow_env", type=int, default=600,
                     help="Env index the camera/depth pane follow. GO1 envs 0-499 are command-zero (stand still); follow >=500.")
 parser.add_argument("--terrain", type=str, default="rough",
                     help="Tiled env terrain: rough | stairs | slope | flat (e.g. --terrain stairs to record stair climbing).")
+parser.add_argument("--dual_pane_student_depth", action="store_true", default=False,
+                    help="Show the student's sanitized depth (clip [0.1, 2.0], no-hit -> 1.0) in the dual-pane "
+                         "right pane instead of the raw camera depth.")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
@@ -339,15 +342,24 @@ def _save_dagger_policy(
     print(f"[INFO] Saved DAgger student policy checkpoint to: {path}")
 
 
-def _dual_pane_frame(env, env_index=600, depth_range=(0.2, 5.0)) -> np.ndarray:
-    """Composite a single frame: [left: Isaac Sim view | right: live grayscale depth] for one env."""
+def _dual_pane_frame(env, env_index=600, depth_range=(0.2, 5.0), student_depth=False) -> np.ndarray:
+    """Composite a single frame: [left: Isaac Sim view | right: live grayscale depth] for one env.
+
+    If ``student_depth`` is True, the right pane shows exactly what the student obs receives
+    (the sanitized depth clipped to [0.1, 2.0], no-hit -> 1.0) instead of the raw camera depth.
+    """
     sim_frame = env.unwrapped.render()
     sim_bgr = cv2.cvtColor(sim_frame, cv2.COLOR_RGB2BGR)
-    raw = env.unwrapped._depth_camera.data.output["distance_to_image_plane"]
-    d = raw[env_index, ..., 0].float()
-    d = torch.nan_to_num(d, nan=float("inf"), posinf=float("inf"), neginf=float("inf"))
-    d = (d - depth_range[0]) / (depth_range[1] - depth_range[0])
-    d = torch.clamp(d, 0.0, 1.0)  # no-hit (inf) -> 1.0 -> black
+    if student_depth:
+        # Student obs input: _sanitize_depth_data clips to [0.1, 2.0], no-hit -> 1.0.
+        d = _sanitize_depth_data(env)[env_index, 0].float()
+        d = (d - 0.1) / (2.0 - 0.1)
+    else:
+        raw = env.unwrapped._depth_camera.data.output["distance_to_image_plane"]
+        d = raw[env_index, ..., 0].float()
+        d = torch.nan_to_num(d, nan=float("inf"), posinf=float("inf"), neginf=float("inf"))
+        d = (d - depth_range[0]) / (depth_range[1] - depth_range[0])
+    d = torch.clamp(d, 0.0, 1.0)  # no-hit -> 1.0 -> black
     gray = (255.0 * (1.0 - d)).to(torch.uint8).cpu().numpy()  # near = bright, far = dark
     depth_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
     h, w = sim_bgr.shape[:2]
@@ -631,7 +643,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 dual_fname = os.path.join(log_dir, "videos", "dagger", f"dual_step-{step}.mp4")
                 os.makedirs(os.path.dirname(dual_fname), exist_ok=True)
             if dual_frames_left > 0:
-                frame = _dual_pane_frame(env, env_index=args_cli.follow_env)
+                frame = _dual_pane_frame(env, env_index=args_cli.follow_env,
+                                        student_depth=args_cli.dual_pane_student_depth)
                 if dual_writer is None:
                     dual_writer = cv2.VideoWriter(
                         dual_fname, cv2.VideoWriter_fourcc(*"mp4v"), 50, (frame.shape[1], frame.shape[0])

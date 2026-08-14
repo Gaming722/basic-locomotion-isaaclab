@@ -615,14 +615,14 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
         prim_path="/World/envs/env_.*/Robot/base/d435",
         update_period=1 / 60,
         offset=TiledCameraCfg.OffsetCfg(
-            pos=(0.26, 0.0, 0.12),  # URDF d435_joint mount (x=0.26, z=0.12)
+            pos=(0.26, 0.0, 0.12),  # URDF d435_joint mount
             rot=(-0.353553, 0.612372, -0.612372, 0.353553),  # 30 deg down + upright image (w,x,y,z)
             convention="ros",
         ),
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0,
             focus_distance=400.0,
-            horizontal_aperture=45.55,  # D435 depth HFOV ~87 deg (M1-validated)
+            horizontal_aperture=45.55,  # D435 depth HFOV ~87 deg (real D435 alignment)
             clipping_range=(0.01, 3.0),
         ),
         depth_clipping_behavior="max",
