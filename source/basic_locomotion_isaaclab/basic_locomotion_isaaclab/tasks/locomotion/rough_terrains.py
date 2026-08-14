@@ -9,7 +9,8 @@ terrain as a switchable alternative.
   slopes), shared by GO1 and Aliengo so their reward curves are comparable.
 * ``GO1_ROUGH_TERRAINS_CFG``: the original GO1 curriculum terrain (discrete
   obstacles ramp with difficulty, more stairs). Point a robot class's
-  ``ROUGH_TERRAINS_CFG`` at this one to switch back.
+  ``ROUGH_TERRAINS_CFG`` at this one to switch back. Stairs go up to 0.20 m
+  (raised 2026-08-15 from 0.13 m to push the teacher onto harder terrain).
 """
 
 import isaaclab.terrains as terrain_gen
@@ -93,11 +94,11 @@ GO1_ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             proportion=0.1, slope_range=(0.2, 0.4), platform_width=2.0, border_width=0.25
         ),
         "pyramid_stairs": terrain_gen.MeshPyramidStairsTerrainCfg(
-            proportion=0.2, step_height_range=(0.05, 0.13), step_width=0.3,
+            proportion=0.2, step_height_range=(0.05, 0.20), step_width=0.3,
             platform_width=3.0, border_width=1.0, holes=False,
         ),
         "pyramid_stairs_inv": terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
-            proportion=0.2, step_height_range=(0.05, 0.13), step_width=0.3,
+            proportion=0.2, step_height_range=(0.05, 0.20), step_width=0.3,
             platform_width=3.0, border_width=1.0, holes=False,
         ),
     },
