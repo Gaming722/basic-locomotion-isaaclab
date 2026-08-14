@@ -38,7 +38,7 @@ from isaaclab.utils import configclass
 
 from .aliengo_env_cfg import AliengoFlatEnvCfg, AliengoRoughBlindEnvCfg, AliengoRoughVisionEnvCfg
 from .go2_env_cfg import Go2FlatEnvCfg, Go2RoughVisionEnvCfg, Go2RoughBlindEnvCfg
-from .go1_env_cfg import Go1FlatEnvCfg, Go1RoughVisionEnvCfg, Go1RoughBlindEnvCfg
+from .go1_env_cfg import Go1FlatEnvCfg, Go1RoughVisionEnvCfg, Go1RoughBlindEnvCfg, Go1RoughVisionTiledEnvCfg
 from .hyqreal_env_cfg import HyQRealFlatEnvCfg, HyQRealRoughVisionEnvCfg, HyQRealRoughBlindEnvCfg
 from .b2_env_cfg import B2FlatEnvCfg, B2RoughVisionEnvCfg, B2RoughBlindEnvCfg
 from .pegasus_env_cfg import PegasusFlatEnvCfg, PegasusRoughVisionEnvCfg, PegasusRoughBlindEnvCfg
@@ -81,6 +81,8 @@ class LocomotionEnv(DirectRLEnv):
 
         # Observation history
         self._observation_history = torch.zeros(self.num_envs, cfg.history_length, cfg.single_observation_space, device=self.device)
+        # Sim base_lin_vel history (DAgger: spliced into teacher_obs, never the student obs)
+        self._vel_history = torch.zeros(self.num_envs, cfg.history_length, 3, device=self.device)
 
         # RMA
         if(cfg.use_rma == True):
@@ -226,10 +228,11 @@ class LocomotionEnv(DirectRLEnv):
 
         # we add a depth camera if needed for vision-based locomotion
         if(getattr(self.cfg, "use_depth_camera", False)):
-            self._depth_camera = MultiMeshRayCasterCamera(self.cfg.depth_camera)
-            ##self._depth_camera = TiledCamera(self.cfg.depth_camera)
+            if isinstance(self.cfg.depth_camera, TiledCameraCfg):
+                self._depth_camera = TiledCamera(self.cfg.depth_camera)
+            else:
+                self._depth_camera = MultiMeshRayCasterCamera(self.cfg.depth_camera)
             self.scene.sensors["depth_camera"] = self._depth_camera
-            pass
 
         # we add the Unitree L2 LiDAR if needed for vision-based locomotion
         if(getattr(self.cfg, "use_unitree_l2_lidar", False)):
@@ -243,7 +246,23 @@ class LocomotionEnv(DirectRLEnv):
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
-        
+
+        # TiledCamera dagger envs (cfg.enforce_env_spacing): one robot per sub-terrain
+        # (8 m spacing >> 2 m far clip) so the rendered depth never sees a neighbour.
+        if getattr(self.cfg, "enforce_env_spacing", False) and self.cfg.terrain.terrain_generator is not None:
+            gen = self.cfg.terrain.terrain_generator
+            rows, cols = gen.num_rows, gen.num_cols
+            if rows * cols < self.scene.cfg.num_envs:
+                raise RuntimeError(
+                    f"terrain {rows}x{cols} sub-terrains < num_envs {self.scene.cfg.num_envs}; "
+                    "enlarge the terrain (Go1RoughVisionTiledEnvCfg.__post_init__) or reduce --num_envs"
+                )
+            idx = torch.arange(self.scene.cfg.num_envs, device=self.device)
+            r = idx // cols
+            c = idx % cols
+            self._terrain.env_origins = self._terrain.terrain_origins[r, c]
+            self._terrain.terrain_levels = r
+
         # clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)
         self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
@@ -308,8 +327,13 @@ class LocomotionEnv(DirectRLEnv):
             base_linear = self._robot.data.root_lin_vel_b
             base_ang_vel = self._robot.data.root_ang_vel_b
             projected_gravity_b = self._robot.data.projected_gravity_b
-        
-        
+
+        # DAgger student: exclude base_lin_vel (not available on the real robot).
+        # The teacher still receives it via teacher_obs (emit_teacher_obs) when enabled.
+        if not getattr(self.cfg, "use_lin_vel_obs", True):
+            base_linear = None
+
+
         # Standard Obs for the Actor/Critic
         obs = torch.cat(
             [
@@ -334,6 +358,14 @@ class LocomotionEnv(DirectRLEnv):
             obs = torch.flatten(self._observation_history, start_dim=1)
 
 
+        # DAgger: keep a per-frame sim base_lin_vel history so teacher_obs can carry it
+        # (spliced in front of each history frame, matching the teacher's training layout).
+        emit_teacher_obs = getattr(self.cfg, "emit_teacher_obs", False)
+        if emit_teacher_obs:
+            self._vel_history = torch.cat(
+                (self._vel_history[:, 1:], self._robot.data.root_lin_vel_b.unsqueeze(1)), dim=1
+            )
+
         observations = {"common": obs}
 
 
@@ -346,7 +378,16 @@ class LocomotionEnv(DirectRLEnv):
             )
             height_data = torch.nan_to_num(height_data, nan=0.0, posinf=1.0, neginf=-1.0)
             height_data = height_data.clip(-1.0, 1.0)
-            obs = torch.cat((obs, height_data), dim=-1)   
+            obs = torch.cat((obs, height_data), dim=-1)
+
+        # DAgger: build the privileged teacher obs (sim base_lin_vel + heightmap) so the
+        # expert policy can label the student states. Teacher reads via obs_groups.
+        if emit_teacher_obs:
+            teacher_hist = torch.cat((self._vel_history, self._observation_history), dim=-1)
+            teacher_obs = torch.flatten(teacher_hist, start_dim=1)
+            if getattr(self.cfg, "use_vision", False):
+                teacher_obs = torch.cat((teacher_obs, height_data), dim=-1)
+            observations["teacher_obs"] = teacher_obs   
 
 
         # Critic OBS could be different if needed
@@ -542,6 +583,7 @@ class LocomotionEnv(DirectRLEnv):
 
         # Reset observation history
         self._observation_history[env_ids] *= 0.0
+        self._vel_history[env_ids] *= 0.0
 
         # Reset obs and noise concurrent
         if(self.cfg.use_concurrent_state_est):

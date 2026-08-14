@@ -17,6 +17,8 @@ from isaaclab.sensors import (
 from isaaclab.sim import SimulationCfg, PhysxCfg
 from isaaclab.envs import ViewerCfg
 from isaaclab.terrains import TerrainImporterCfg
+import isaaclab.terrains as terrain_gen
+from isaaclab.terrains.terrain_generator_cfg import TerrainGeneratorCfg
 from isaaclab.sensors import ImuCfg
 from isaaclab.utils import configclass
 
@@ -126,7 +128,10 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     decimation = 4
     action_scale = 0.5
     action_space = 12
-    observation_space = 3 # base linear velocity
+    # DAgger student envs (Go1RoughVisionTiledEnvCfg) set this False: the real robot has
+    # no base_lin_vel, so it is excluded from the obs and the history buffer dimension.
+    use_lin_vel_obs = True
+    observation_space = 3 if use_lin_vel_obs else 0  # base linear velocity
     observation_space += 3 # base angular velocity  
     observation_space += 3 # projected gravity in base frame
     observation_space += 3 # command (desired linear vel in x and y, desired yaw rate)
@@ -511,4 +516,76 @@ class Go1RoughVisionEnvCfg(Go1RoughBlindEnvCfg):
             #MultiMeshRayCasterCfg.RaycastTargetCfg(prim_expr="/World/envs/env_.*/Robot/RR_.*/visuals"),
         ],
         max_distance=2.0,
+    )
+
+
+@configclass
+class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
+    """GO1 DAgger student env: TiledCamera depth, no base_lin_vel obs, teacher_obs emitted.
+
+    Replaces the raycast depth with a GPU-rendered TiledCamera mounted at the URDF d435
+    pose (d435_bottom_screw_frame), so the student sees depth like the real D435. The
+    student obs ("common") excludes base_lin_vel (not available on the real robot); the
+    privileged teacher obs ("teacher_obs") carries the sim base_lin_vel + heightmap so the
+    expert can label student states during DAgger. Requires --enable_cameras at launch.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # One robot per 8x8 m sub-terrain so the rendered depth never sees a neighbour
+        # robot (8 m spacing >> 2 m far clip). Large flat grid for the first DAgger run.
+        self.terrain.terrain_generator = TerrainGeneratorCfg(
+            curriculum=False,
+            size=(8.0, 8.0),
+            border_width=20.0,
+            num_rows=46,
+            num_cols=46,
+            horizontal_scale=0.1,
+            vertical_scale=0.005,
+            slope_threshold=0.75,
+            use_cache=False,
+            sub_terrains={"flat": terrain_gen.MeshPlaneTerrainCfg(proportion=1.0)},
+        )
+        self.scene.num_envs = min(self.scene.num_envs, 46 * 46)
+        if not self.use_lin_vel_obs:
+            # base_lin_vel excluded -> single obs space and the history buffer shrink by 3.
+            self.single_observation_space = self.single_observation_space - 3
+            self.observation_space = self.single_observation_space * self.history_length
+
+    use_lin_vel_obs = False       # student obs: no base_lin_vel (real robot has no odometry)
+    emit_teacher_obs = True       # emit teacher_obs (sim base_lin_vel + heightmap) for the expert
+    enforce_env_spacing = True    # one robot per sub-terrain so depth can't see neighbours
+    # viewer env_index=500 assumes >=501 envs; use 0 so the Tiled env works at low num_envs.
+    viewer: ViewerCfg = ViewerCfg(
+        eye=(-3.0, 1.2, 1.8),
+        lookat=(0.0, 0.0, 0.35),
+        origin_type="asset_root",
+        asset_name="robot",
+        env_index=0,
+        resolution=(1280, 720),
+    )
+    use_depth_camera = True
+    visualize_camera_mount = False
+    depth_camera = TiledCameraCfg(
+        # Mount on base with the URDF d435_joint pose (0.23, 0, 0.10, 30 deg down).
+        # The d435 link cannot survive the fixed-joint merge (absorbed into trunk), so
+        # the camera pose is replicated via this offset instead of a dedicated link.
+        prim_path="/World/envs/env_.*/Robot/base/d435",
+        update_period=1 / 60,
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(0.23, 0.0, 0.10),
+            rot=(-0.405579, 0.579228, -0.579228, 0.405579),
+            convention="ros",
+        ),
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0,
+            focus_distance=400.0,
+            horizontal_aperture=45.55,  # D435 depth HFOV ~87 deg (M1-validated)
+            clipping_range=(0.01, 3.0),
+        ),
+        depth_clipping_behavior="max",
+        data_types=["distance_to_image_plane"],
+        height=140,
+        width=240,
+        debug_vis=False,
     )

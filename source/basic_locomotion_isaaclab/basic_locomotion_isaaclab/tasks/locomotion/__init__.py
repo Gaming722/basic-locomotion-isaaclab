@@ -86,7 +86,7 @@ gym.register(
 
 
 # Go1 environments
-from .locomotion_env import Go1FlatEnvCfg, Go1RoughVisionEnvCfg, Go1RoughBlindEnvCfg
+from .locomotion_env import Go1FlatEnvCfg, Go1RoughVisionEnvCfg, Go1RoughBlindEnvCfg, Go1RoughVisionTiledEnvCfg
 
 gym.register(
     id="Locomotion-Go1-Flat",
@@ -114,6 +114,16 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": Go1RoughVisionEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:RoughPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Locomotion-Go1-Rough-Vision-Tiled",
+    entry_point=LocomotionEnv,
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": Go1RoughVisionTiledEnvCfg,
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:RoughPPORunnerCfg",
     },
 )
