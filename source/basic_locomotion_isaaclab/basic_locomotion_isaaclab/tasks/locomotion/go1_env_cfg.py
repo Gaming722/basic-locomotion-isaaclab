@@ -535,6 +535,12 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
     # e.g. --terrain stairs to capture stair climbing).
     terrain_type: str = "rough"
 
+    # Optional fixed terrain difficulty (0.0-1.0). When set, every sub-terrain is
+    # generated at exactly this difficulty (difficulty_range=(d, d)) instead of a
+    # random sample, so e.g. --terrain stairs --difficulty 1.0 gives all-max-height
+    # stairs. None (default) keeps the random per-sub-terrain sampling.
+    difficulty: float | None = None
+
     def __post_init__(self) -> None:
         super().__post_init__()
         self.rebuild_terrain()
@@ -562,11 +568,11 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
         elif self.terrain_type == "stairs":
             sub_terrains = {
                 "pyramid_stairs": terrain_gen.MeshPyramidStairsTerrainCfg(
-                    proportion=0.5, step_height_range=(0.05, 0.18), step_width=0.3,
+                    proportion=0.5, step_height_range=(0.05, 0.20), step_width=0.3,
                     platform_width=3.0, border_width=1.0, holes=False,
                 ),
                 "pyramid_stairs_inv": terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
-                    proportion=0.5, step_height_range=(0.05, 0.18), step_width=0.3,
+                    proportion=0.5, step_height_range=(0.05, 0.20), step_width=0.3,
                     platform_width=3.0, border_width=1.0, holes=False,
                 ),
             }
@@ -581,6 +587,11 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
             }
         else:
             raise ValueError(f"Unknown terrain_type: {self.terrain_type}")
+        # a fixed difficulty pins every sub-terrain to the same value
+        # (uniform(d,d) == d), so e.g. difficulty=1.0 renders all-max stairs.
+        difficulty_range = (
+            (self.difficulty, self.difficulty) if self.difficulty is not None else (0.0, 1.0)
+        )
         self.terrain.terrain_generator = TerrainGeneratorCfg(
             curriculum=False,
             size=GO1_ROUGH_TERRAINS_CFG.size,
@@ -592,6 +603,7 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
             slope_threshold=GO1_ROUGH_TERRAINS_CFG.slope_threshold,
             use_cache=GO1_ROUGH_TERRAINS_CFG.use_cache,
             sub_terrains=sub_terrains,
+            difficulty_range=difficulty_range,
         )
 
     use_lin_vel_obs = False       # student obs: no base_lin_vel (real robot has no odometry)
