@@ -264,12 +264,15 @@ def _apply_depth_sensor_noise(depth: torch.Tensor) -> torch.Tensor:
     the deploy side (--depth_*_... flags).
     """
     # 1) optical / downscale blur (Gaussian smoothing of the depth field).
-    #    padding_mode="replicate" avoids the zero-padding artifact where border pixels get
-    #    pulled toward 0 (which would read as a false "very near" border).
+    #    F.pad(mode="replicate") before the conv avoids the zero-padding artifact where border
+    #    pixels get pulled toward 0 (which would read as a false "very near" border). Note:
+    #    done this way because some torch builds do not accept padding_mode= in F.conv2d.
     if args_cli.depth_blur_sigma > 0:
         kernel_size = max(3, int(2 * math.ceil(2 * args_cli.depth_blur_sigma) + 1))
         kernel = _gaussian_kernel(kernel_size, args_cli.depth_blur_sigma, depth.device)
-        depth = F.conv2d(depth, kernel, padding=kernel_size // 2, padding_mode="replicate")
+        pad = kernel_size // 2
+        depth = F.pad(depth, (pad, pad, pad, pad), mode="replicate")
+        depth = F.conv2d(depth, kernel)
 
     # 2) measurement noise (depth quantization / stereo error), then re-clamp so the student
     #    input stays in the [0.1, 2.0] range the deploy pipeline is defined on.
