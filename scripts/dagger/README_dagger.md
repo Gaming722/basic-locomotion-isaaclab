@@ -82,6 +82,52 @@ below). If no `--checkpoint`/`--load_run` is given, the script auto-selects the
   sanitized depth** (nan_to_num + clip [0.1, 2.0] + depth_min_z mask) instead of the
   raw camera depth — i.e. exactly what feeds the student GRU.
 
+### Depth sensor simulation (noise + latency)
+
+By default the student depth is passed through a small D435-like sensor model (in
+`_sanitize_depth_data`, applied on GPU before the frame enters the history buffer):
+
+- `--depth_blur_sigma` (default `1.0` px): Gaussian blur to simulate optics / the
+  848→240 downscale smoothing. `0` disables.
+- `--depth_additive_noise_std` (default `0.0` m): additive Gaussian depth noise.
+- `--depth_dropout_prob` (default `0.0`): probability of dropping a pixel to the
+  far-saturation code `2.0` (simulates D435 holes / invalid depth).
+- `--depth_delay_frames` (default `1`): delays the depth fed to the student by N
+  env steps, modelling capture→inference latency. Must be `< --depth_history_length`.
+
+Processing order: blur (replicate padding, no border artifact) → additive noise →
+re-clip to `[0.1, 2.0]` → dropout holes → `depth_min_z` mask. Keep these knobs in
+sync with the on-robot depth preprocessing. To reproduce the old clean-depth
+behavior, run with `--depth_blur_sigma 0 --depth_delay_frames 0`.
+
+### Depth encoding & sim-to-real contract
+
+The camera config is **unchanged** (`clipping_range=(0.01, 3.0)`,
+`depth_clipping_behavior="max"`). The depth fed to the student follows the
+"everything unmeasurable → far" convention (same as the InstinctLab reference):
+
+| Pixel | Raw camera | After pipeline |
+|---|---|---|
+| valid in `[0.1, 2.0]` m | real depth | real depth |
+| no-hit / far (> 3.0 m) | 3.0 | `2.0` (far-saturation) |
+| holes (`--depth_dropout_prob`) | — | `2.0` |
+| sub-`depth_min_z` (if enabled) | real depth | `2.0` |
+
+**Deploy-side contract (mandatory):** a real D435 emits `0` (16-bit raw) for any
+pixel it cannot measure (too close / too far / specular / hole). Feed the real
+depth through the **exact same** pipeline as `_sanitize_depth_data`, and map
+invalid pixels to far before/after the clip so they stay in-distribution:
+`real_depth[real_depth == 0] = 2.0` (or `3.0` before the `[0.1, 2.0]` clip). If you
+skip this, real holes read as `0.1` (near) while training only ever showed `2.0`
+(far) — an out-of-distribution input.
+
+> **Provenance:** blur, latency and the "everything unmeasurable → far" encoding
+> follow the InstinctLab reference pipeline (`NoisyGroupedRayCasterCamera` +
+> `crop → blur → depth_normalization`). `--depth_dropout_prob` and `depth_min_z`
+> are **optional extensions (default off)** to make the student robust to the real
+> D435's holes and near-field min-z; they are *not* part of InstinctLab's pipeline.
+> Keep the camera config (`clipping_range`, `depth_clipping_behavior`) unchanged.
+
 ### Record all-max stairs + student depth
 
 ```bash

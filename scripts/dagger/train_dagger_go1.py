@@ -59,6 +59,33 @@ parser.add_argument(
     help="Number of depth frames consumed by the student depth GRU.",
 )
 parser.add_argument(
+    "--depth_blur_sigma",
+    type=float,
+    default=1.0,
+    help="Gaussian blur sigma (px) applied to the student depth to simulate optics / "
+         "848->240 downscale smoothing. 0 disables.",
+)
+parser.add_argument(
+    "--depth_additive_noise_std",
+    type=float,
+    default=0.0,
+    help="Std (m) of additive Gaussian depth noise (D435 measurement noise). 0 disables.",
+)
+parser.add_argument(
+    "--depth_dropout_prob",
+    type=float,
+    default=0.0,
+    help="Probability of dropping a depth pixel to the far-saturation code 2.0 "
+         "(simulate D435 holes/invalid pixels). 0 disables.",
+)
+parser.add_argument(
+    "--depth_delay_frames",
+    type=int,
+    default=1,
+    help="Delay (in env steps) of the depth frames fed to the student, modelling capture->inference "
+         "latency. Must be < --depth_history_length.",
+)
+parser.add_argument(
     "--dagger_buffer_size",
     type=int,
     default=2048,
@@ -169,6 +196,7 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import math
 import os
 from collections import deque
 
@@ -177,6 +205,7 @@ import numpy as np
 
 import gymnasium as gym
 import torch
+import torch.nn.functional as F
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
@@ -208,6 +237,56 @@ import isaaclab.utils.math as math_utils
 from isaacsim.core.utils.viewports import set_camera_view
 
 
+# Cache for the Gaussian blur kernels so they are built once per (size, sigma, device).
+_gaussian_kernel_cache: dict[tuple, torch.Tensor] = {}
+
+
+def _gaussian_kernel(kernel_size: int, sigma: float, device: torch.device) -> torch.Tensor:
+    """Return a (1, 1, k, k) normalized Gaussian blur kernel on ``device`` (cached)."""
+    key = (kernel_size, sigma, str(device))
+    kernel = _gaussian_kernel_cache.get(key)
+    if kernel is not None:
+        return kernel
+    coords = torch.arange(kernel_size, dtype=torch.float32, device=device) - (kernel_size - 1) / 2
+    g = torch.exp(-(coords**2) / (2 * sigma**2))
+    g = g / g.sum()
+    kernel = (g[:, None] * g[None, :]).view(1, 1, kernel_size, kernel_size)
+    _gaussian_kernel_cache[key] = kernel
+    return kernel
+
+
+def _apply_depth_sensor_noise(depth: torch.Tensor) -> torch.Tensor:
+    """Add D435-like artifacts to a (N, 1, H, W) depth image.
+
+    Order matters: optical blur first (there are no holes yet, so the blur does not smear
+    invalid pixels), then measurement noise, then dropout (holes) last so missing pixels stay
+    clean zeros. Parameters mirror the on-robot depth preprocessing -- keep them in sync with
+    the deploy side (--depth_*_... flags).
+    """
+    # 1) optical / downscale blur (Gaussian smoothing of the depth field).
+    #    padding_mode="replicate" avoids the zero-padding artifact where border pixels get
+    #    pulled toward 0 (which would read as a false "very near" border).
+    if args_cli.depth_blur_sigma > 0:
+        kernel_size = max(3, int(2 * math.ceil(2 * args_cli.depth_blur_sigma) + 1))
+        kernel = _gaussian_kernel(kernel_size, args_cli.depth_blur_sigma, depth.device)
+        depth = F.conv2d(depth, kernel, padding=kernel_size // 2, padding_mode="replicate")
+
+    # 2) measurement noise (depth quantization / stereo error), then re-clamp so the student
+    #    input stays in the [0.1, 2.0] range the deploy pipeline is defined on.
+    if args_cli.depth_additive_noise_std > 0:
+        depth = depth + torch.randn_like(depth) * args_cli.depth_additive_noise_std
+    depth = depth.clip(0.1, 2.0)
+
+    # 3) missing pixels (holes) -> far-saturation (2.0), matching the "unmeasurable = far"
+    #    convention (no-hit -> 3.0 -> clip -> 2.0). The deploy side must map real D435 invalid
+    #    pixels (0) to 2.0 as well, so holes stay in-distribution.
+    if args_cli.depth_dropout_prob > 0:
+        drop = torch.rand(depth.shape, device=depth.device) < args_cli.depth_dropout_prob
+        depth = depth.masked_fill(drop, 2.0)
+
+    return depth
+
+
 def _sanitize_depth_data(env: RslRlVecEnvWrapper) -> torch.Tensor:
     if not hasattr(env.unwrapped, "_depth_camera"):
         raise RuntimeError(
@@ -220,25 +299,37 @@ def _sanitize_depth_data(env: RslRlVecEnvWrapper) -> torch.Tensor:
     # in [0.01, 0.1] m saturates to 0.1 (near-saturation), beyond 2 m to 2.0 (far-saturation).
     depth_data = torch.nan_to_num(depth_data, nan=0.0, posinf=1.0, neginf=-1.0)
     depth_data = depth_data.clip(0.1, 2.0)
-    # D435 Min-Z alignment (env_cfg.depth_min_z), applied AFTER the [0.1, 2.0] clip so
-    # both no-hit and sub-Min-Z pixels become no-data = 0. 0.0 disables (Aliengo).
+    depth_data = depth_data.permute(0, 3, 1, 2).contiguous()
+    # D435-like sensor noise (blur -> measurement noise -> dropout holes).
+    depth_data = _apply_depth_sensor_noise(depth_data)
+    # D435 Min-Z alignment (env_cfg.depth_min_z): sub-Min-Z pixels (incl. blurred near-edges)
+    # become far-saturated like every other unmeasurable pixel (deploy maps real D435 0 -> 2.0).
+    # 0.0 disables (GO1 default).
     depth_min_z = getattr(env.unwrapped.cfg, "depth_min_z", 0.0)
     if depth_min_z > 0:
-        depth_data = torch.where(depth_data < depth_min_z, 0.0, depth_data)
-    depth_data = depth_data.permute(0, 3, 1, 2)
+        depth_data = torch.where(depth_data < depth_min_z, 2.0, depth_data)
     return depth_data
+
+
+def _delayed_newest_index(history_index: int, history_length: int) -> int:
+    """Index into ``depth_history`` treated as the newest frame fed to the student.
+
+    Mirrors the pipeline latency on the real robot: by the time an action is computed for the
+    current state, the depth image available was captured ``--depth_delay_frames`` steps earlier.
+    """
+    return (history_index - args_cli.depth_delay_frames) % history_length
 
 
 def _depth_sequence_from_history(
     depth_history: torch.Tensor,
-    history_index: int,
+    newest_index: int,
     env_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     history_length = depth_history.shape[0]
     ordered_history = torch.cat(
         (
-            torch.arange(history_index + 1, history_length, device=depth_history.device),
-            torch.arange(0, history_index + 1, device=depth_history.device),
+            torch.arange(newest_index + 1, history_length, device=depth_history.device),
+            torch.arange(0, newest_index + 1, device=depth_history.device),
         )
     )
     if env_indices is not None:
@@ -265,7 +356,7 @@ def _autocast_context(device: torch.device | str):
 def _predict_student_actions_chunked(
     dagger_net: DaggerNet,
     depth_history: torch.Tensor,
-    history_index: int,
+    newest_index: int,
     common_obs: torch.Tensor,
     env_indices_cpu: torch.Tensor | None,
     device: torch.device | str,
@@ -288,7 +379,7 @@ def _predict_student_actions_chunked(
 
         chunk_depth_cpu = _depth_sequence_from_history(
             depth_history=depth_history,
-            history_index=history_index,
+            newest_index=newest_index,
             env_indices=chunk_indices_cpu,
         )
         chunk_depth = chunk_depth_cpu.to(device=device, dtype=torch.float32, non_blocking=True)
@@ -394,6 +485,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.rebuild_terrain()  # __post_init__ already ran at hydra parse; rebuild with the CLI terrain
     if args_cli.depth_history_length <= 0:
         raise ValueError("--depth_history_length must be positive.")
+    if args_cli.depth_delay_frames < 0:
+        raise ValueError("--depth_delay_frames must be non-negative.")
+    if args_cli.depth_delay_frames >= args_cli.depth_history_length:
+        raise ValueError("--depth_delay_frames must be smaller than --depth_history_length.")
+    if args_cli.depth_blur_sigma < 0:
+        raise ValueError("--depth_blur_sigma must be non-negative.")
+    if args_cli.depth_additive_noise_std < 0:
+        raise ValueError("--depth_additive_noise_std must be non-negative.")
+    if not 0.0 <= args_cli.depth_dropout_prob < 1.0:
+        raise ValueError("--depth_dropout_prob must be in [0.0, 1.0).")
     if args_cli.dagger_train_every <= 0:
         raise ValueError("--dagger_train_every must be positive.")
     if args_cli.dagger_updates_per_train <= 0:
@@ -516,6 +617,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "robot_obs_key": "common",
         "depth_history_length": args_cli.depth_history_length,
         "depth_history_storage": "cpu_float16",
+        "depth_delay_frames": args_cli.depth_delay_frames,
+        "depth_sensor_noise": {
+            "blur_sigma": args_cli.depth_blur_sigma,
+            "additive_noise_std": args_cli.depth_additive_noise_std,
+            "dropout_prob": args_cli.depth_dropout_prob,
+        },
         "depth_image_size": tuple(current_depth_cpu.shape[-2:]),
         "depth_channels": depth_channels,
         "common_obs_size": common_obs_size,
@@ -529,6 +636,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(
         "[INFO] Starting online DAgger training "
         f"(num_envs={num_envs}, depth_history={args_cli.depth_history_length}, "
+        f"depth_delay={args_cli.depth_delay_frames} step(s), depth_blur_sigma={args_cli.depth_blur_sigma}, "
+        f"depth_additive_std={args_cli.depth_additive_noise_std}, depth_dropout={args_cli.depth_dropout_prob}, "
         f"buffer={args_cli.dagger_buffer_size}, batch={args_cli.dagger_batch_size}, "
         f"train_micro_batch={args_cli.dagger_train_micro_batch_size}, "
         f"inference_batch={args_cli.dagger_inference_batch_size}, amp={_use_cuda_amp(device)})."
@@ -565,6 +674,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         args_cli.max_training_steps is None or step < args_cli.max_training_steps
     ):
         common_obs = obs["common"]
+        # feed the student depth delayed by --depth_delay_frames (capture->inference latency)
+        newest_index = _delayed_newest_index(history_index, args_cli.depth_history_length)
 
         dagger_net.eval()
         with torch.inference_mode():
@@ -585,7 +696,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 student_actions, student_env_indices_gpu = _predict_student_actions_chunked(
                     dagger_net=dagger_net,
                     depth_history=depth_history,
-                    history_index=history_index,
+                    newest_index=newest_index,
                     common_obs=common_obs,
                     env_indices_cpu=student_env_indices_cpu,
                     device=device,
@@ -601,7 +712,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         replay_env_indices_cpu = _sample_env_indices(num_envs, args_cli.dagger_samples_per_step)
         replay_depth_cpu = _depth_sequence_from_history(
             depth_history=depth_history,
-            history_index=history_index,
+            newest_index=newest_index,
             env_indices=replay_env_indices_cpu,
         )
         if replay_env_indices_cpu is None:
