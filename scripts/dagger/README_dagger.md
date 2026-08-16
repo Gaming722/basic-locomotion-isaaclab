@@ -64,8 +64,34 @@ python scripts/dagger/train_dagger_go1.py \
   `logs/rsl_rl/rough_direct/<run>/videos/dagger/dual_step-<N>.mp4`
 - Student policy checkpoint: `logs/rsl_rl/rough_direct/<run>/dagger_policy.pt`
 
+`<run>` is the directory of the loaded teacher checkpoint (see `--checkpoint`
+below). If no `--checkpoint`/`--load_run` is given, the script auto-selects the
+**latest** run and checkpoint in `logs/rsl_rl/rough_direct/`.
+
 ### Useful flags
 
 - `--resume_from <path>`: resume the student from a saved `dagger_policy.pt`.
 - `--video_interval 500`: record videos more often (default 1000 steps).
 - `--follow_env 500`: follow a specific env index (must be >= 500).
+- `--terrain <rough|stairs|slope|flat>`: pick the Tiled env terrain. `stairs` and
+  `slope` select a single terrain type (handy for recording, e.g. stair climbing).
+- `--difficulty <0.0-1.0>`: pin every sub-terrain to exactly this difficulty
+  (default = random per sub-terrain). Combine with `--terrain stairs --difficulty 1.0`
+  to record **all-max-height stairs** (0.20 m).
+- `--dual_pane_student_depth`: the right dual-pane shows the **student actor's
+  sanitized depth** (nan_to_num + clip [0.1, 2.0] + depth_min_z mask) instead of the
+  raw camera depth — i.e. exactly what feeds the student GRU.
+
+### Record all-max stairs + student depth
+
+```bash
+python scripts/dagger/train_dagger_go1.py \
+  --task=Locomotion-Go1-Rough-Vision-Tiled \
+  --checkpoint=logs/rsl_rl/rough_direct/<run>/model_<N>.pt \
+  --terrain stairs --difficulty 1.0 \
+  --num_envs=1024 --headless --video --dual_pane \
+  --dual_pane_student_depth --video_length=1200
+```
+
+Videos land in `logs/rsl_rl/rough_direct/<run>/videos/dagger/dual_step-<N>.mp4`
+(the directory of the teacher loaded via `--checkpoint`).
