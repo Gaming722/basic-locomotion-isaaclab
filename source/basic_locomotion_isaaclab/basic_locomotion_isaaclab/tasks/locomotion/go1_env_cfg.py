@@ -643,3 +643,130 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
         width=240,
         debug_vis=False,
     )
+
+
+@configclass
+class Go1RoughVisionRayCasterEnvCfg(Go1RoughVisionEnvCfg):
+    """GO1 DAgger student env: MultiMeshRayCasterCamera depth, no base_lin_vel, teacher_obs emitted.
+
+    Reuses the original author's raycast depth camera (``Go1RoughVisionEnvCfg.depth_camera``)
+    but re-targets it to the real-D435 intrinsics (87 deg HFOV, 240x140) and the same d435
+    mount pose as the Tiled student, so the two students see the same view. The depth is a
+    Warp ray-cast over ``/World/ground`` + the robot's own links (self-occlusion), which is
+    cheaper than TiledCamera (no renderer) and inherently never sees neighbouring envs.
+    Terrain is the standard curriculum (``GO1_ROUGH_TERRAINS_CFG``, curriculum=True) so 4096
+    envs train without the ``enforce_env_spacing`` the Tiled env needs.
+    """
+
+    # ---- DAgger student flags (mirror Go1RoughVisionTiledEnvCfg) ----
+    use_lin_vel_obs = False       # student obs: no base_lin_vel (real robot has no odometry)
+    emit_teacher_obs = True       # emit teacher_obs (sim base_lin_vel + heightmap) for the expert
+
+    # ---- terrain_type / difficulty / rebuild_terrain (train_dagger_go1.py depends on this API) ----
+    terrain_type: str = "rough"   # rough | stairs | slope | flat (for --terrain recording)
+    difficulty: float | None = None
+
+    use_depth_camera = True
+    visualize_camera_mount = False
+    depth_camera = MultiMeshRayCasterCameraCfg(
+        # Mount on base with the same URDF d435_joint pose as the Tiled student so the two
+        # students see an identical view (87 deg / 240x140).
+        prim_path="/World/envs/env_.*/Robot/base",
+        update_period=1 / 60,
+        offset=MultiMeshRayCasterCameraCfg.OffsetCfg(
+            pos=(0.26, 0.0, 0.12),
+            rot=(-0.353553, 0.612372, -0.612372, 0.353553),  # 30 deg down + upright image (w,x,y,z)
+            convention="ros",
+        ),
+        mesh_prim_paths=[
+            "/World/ground",
+            # self-occlusion: ray-cast the robot's own body too, like the real D435 sees it.
+            # Same link patterns the original author left commented out in Go1RoughVisionEnvCfg.
+            "/World/envs/env_.*/Robot/base/visuals",
+            "/World/envs/env_.*/Robot/FL_*/visuals",
+            "/World/envs/env_.*/Robot/FR_*/visuals",
+            "/World/envs/env_.*/Robot/RL_*/visuals",
+            "/World/envs/env_.*/Robot/RR_*/visuals",
+        ],
+        pattern_cfg=patterns.PinholeCameraPatternCfg(
+            focal_length=24.0,
+            horizontal_aperture=45.55,  # D435 depth HFOV ~87 deg (matches Tiled student)
+            height=140,
+            width=240,
+        ),
+        data_types=["distance_to_image_plane"],
+        # no-hit / >3 m -> 3.0 -> pipeline clip -> 2.0 (far-saturation), same as Tiled far clip.
+        depth_clipping_behavior="max",
+        max_distance=3.0,
+        debug_vis=False,
+    )
+
+    # viewer env_index=0 works at any num_envs (same as Tiled).
+    viewer: ViewerCfg = ViewerCfg(
+        eye=(-3.0, 1.2, 1.8),
+        lookat=(0.0, 0.0, 0.35),
+        origin_type="asset_root",
+        asset_name="robot",
+        env_index=0,
+        resolution=(1280, 720),
+    )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()  # Go1RoughVisionEnvCfg: adds the heightmap to observation_space
+        self.rebuild_terrain()
+        if not self.use_lin_vel_obs:
+            # base_lin_vel excluded -> single obs space and the history buffer shrink by 3.
+            self.single_observation_space = self.single_observation_space - 3
+            self.observation_space = self.single_observation_space * self.history_length
+
+    def rebuild_terrain(self) -> None:
+        """Rebuild the terrain generator from ``terrain_type`` with the standard curriculum.
+
+        Unlike the Tiled env (curriculum=False + enforce_env_spacing), the ray-cast camera
+        only ever sees ``/World/ground`` + its own links, so envs can use the normal
+        per-sub-terrain curriculum (curriculum=True) without overlapping. Same
+        ``--terrain``/``--difficulty`` API as the Tiled env so train_dagger_go1.py works
+        unchanged.
+        """
+        if self.terrain_type == "rough":
+            sub_terrains = GO1_ROUGH_TERRAINS_CFG.sub_terrains
+        elif self.terrain_type == "flat":
+            sub_terrains = {"flat": terrain_gen.MeshPlaneTerrainCfg(proportion=1.0)}
+        elif self.terrain_type == "stairs":
+            sub_terrains = {
+                "pyramid_stairs": terrain_gen.MeshPyramidStairsTerrainCfg(
+                    proportion=0.5, step_height_range=(0.05, 0.20), step_width=0.3,
+                    platform_width=3.0, border_width=1.0, holes=False,
+                ),
+                "pyramid_stairs_inv": terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
+                    proportion=0.5, step_height_range=(0.05, 0.20), step_width=0.3,
+                    platform_width=3.0, border_width=1.0, holes=False,
+                ),
+            }
+        elif self.terrain_type == "slope":
+            sub_terrains = {
+                "hf_pyramid_slope": terrain_gen.HfPyramidSlopedTerrainCfg(
+                    proportion=0.5, slope_range=(0.2, 0.4), platform_width=2.0, border_width=0.25
+                ),
+                "hf_pyramid_slope_inv": terrain_gen.HfInvertedPyramidSlopedTerrainCfg(
+                    proportion=0.5, slope_range=(0.2, 0.4), platform_width=2.0, border_width=0.25
+                ),
+            }
+        else:
+            raise ValueError(f"Unknown terrain_type: {self.terrain_type}")
+        difficulty_range = (
+            (self.difficulty, self.difficulty) if self.difficulty is not None else (0.0, 1.0)
+        )
+        self.terrain.terrain_generator = TerrainGeneratorCfg(
+            curriculum=True,   # standard per-sub-terrain curriculum (ray-cast can't see neighbours)
+            size=GO1_ROUGH_TERRAINS_CFG.size,
+            border_width=GO1_ROUGH_TERRAINS_CFG.border_width,
+            num_rows=GO1_ROUGH_TERRAINS_CFG.num_rows,
+            num_cols=GO1_ROUGH_TERRAINS_CFG.num_cols,
+            horizontal_scale=GO1_ROUGH_TERRAINS_CFG.horizontal_scale,
+            vertical_scale=GO1_ROUGH_TERRAINS_CFG.vertical_scale,
+            slope_threshold=GO1_ROUGH_TERRAINS_CFG.slope_threshold,
+            use_cache=GO1_ROUGH_TERRAINS_CFG.use_cache,
+            sub_terrains=sub_terrains,
+            difficulty_range=difficulty_range,
+        )
