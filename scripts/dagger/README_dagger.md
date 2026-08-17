@@ -77,6 +77,9 @@ below). If no `--checkpoint`/`--load_run` is given, the script auto-selects the
 - `--dagger_policy_path <path>`: where to save the student checkpoint (default
   `<teacher_run>/dagger_policy.pt`). Give a distinct path per student variant so
   concurrent runs don't overwrite each other.
+- `--video_output_dir <path>`: where to save dagger videos (default
+  `<teacher_run>/videos/dagger`). Use a distinct dir per concurrent run so videos
+  don't clobber each other.
 - `--video_interval 500`: record videos more often (default 1000 steps).
 - `--follow_env 500`: follow a specific env index (must be >= 500).
 - `--terrain <rough|stairs|slope|flat>`: pick the Tiled env terrain. `stairs` and

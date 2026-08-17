@@ -21,6 +21,13 @@ parser = argparse.ArgumentParser(description="Train a depth-conditioned DAgger p
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_interval", type=int, default=5000, help="Steps between video recordings.")
+parser.add_argument(
+    "--video_output_dir",
+    type=str,
+    default=None,
+    help="Directory to save dagger videos. Defaults to <teacher_run>/videos/dagger. "
+         "Use a distinct dir per concurrent run so videos don't overwrite each other.",
+)
 parser.add_argument("--cam_distance", type=float, default=3.5, help="Camera distance behind the robot (m).")
 parser.add_argument("--cam_height", type=float, default=2.2, help="Camera height above the robot (m).")
 parser.add_argument("--cam_side", type=float, default=0.0,
@@ -537,6 +544,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
 
+    # where dagger videos are written (defaults to <teacher_run>/videos/dagger; override
+    # with --video_output_dir so concurrent runs don't clobber each other's recordings).
+    video_out_dir = (
+        os.path.abspath(args_cli.video_output_dir)
+        if args_cli.video_output_dir
+        else os.path.join(log_dir, "videos", "dagger")
+    )
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
@@ -550,7 +565,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print("[INFO] Dual-pane recording: left = Isaac Sim view, right = live grayscale depth.")
     elif args_cli.video:
         video_kwargs = {
-            "video_folder": os.path.join(log_dir, "videos", "dagger"),
+            "video_folder": video_out_dir,
             "step_trigger": lambda step: step % args_cli.video_interval == 0,
             "video_length": args_cli.video_length,
             "disable_logger": True,
@@ -760,7 +775,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if args_cli.video and args_cli.dual_pane:
             if dual_frames_left == 0 and step % args_cli.video_interval == 0:
                 dual_frames_left = args_cli.video_length
-                dual_fname = os.path.join(log_dir, "videos", "dagger", f"dual_step-{step}.mp4")
+                dual_fname = os.path.join(video_out_dir, f"dual_step-{step}.mp4")
                 os.makedirs(os.path.dirname(dual_fname), exist_ok=True)
             if dual_frames_left > 0:
                 frame = _dual_pane_frame(env, env_index=args_cli.follow_env,
