@@ -681,12 +681,25 @@ class Go1RoughVisionRayCasterEnvCfg(Go1RoughVisionEnvCfg):
         mesh_prim_paths=[
             "/World/ground",
             # self-occlusion: ray-cast the robot's own body too, like the real D435 sees it.
-            # Same link patterns the original author left commented out in Go1RoughVisionEnvCfg.
-            "/World/envs/env_.*/Robot/base/visuals",
-            "/World/envs/env_.*/Robot/FL_*/visuals",
-            "/World/envs/env_.*/Robot/FR_*/visuals",
-            "/World/envs/env_.*/Robot/RL_*/visuals",
-            "/World/envs/env_.*/Robot/RR_*/visuals",
+            # Use RaycastTargetCfg (not plain strings): is_shared=True shares the warp mesh
+            # geometry across envs (fast init, low memory), and track_mesh_transforms=True is
+            # REQUIRED so the moving legs are ray-cast at their current pose (plain strings
+            # would freeze them at the initial pose and disable the shared-mesh dedup).
+            MultiMeshRayCasterCameraCfg.RaycastTargetCfg(
+                prim_expr="/World/envs/env_.*/Robot/base/visuals", is_shared=True, track_mesh_transforms=True
+            ),
+            MultiMeshRayCasterCameraCfg.RaycastTargetCfg(
+                prim_expr="/World/envs/env_.*/Robot/FL_.*/visuals", is_shared=True, track_mesh_transforms=True
+            ),
+            MultiMeshRayCasterCameraCfg.RaycastTargetCfg(
+                prim_expr="/World/envs/env_.*/Robot/FR_.*/visuals", is_shared=True, track_mesh_transforms=True
+            ),
+            MultiMeshRayCasterCameraCfg.RaycastTargetCfg(
+                prim_expr="/World/envs/env_.*/Robot/RL_.*/visuals", is_shared=True, track_mesh_transforms=True
+            ),
+            MultiMeshRayCasterCameraCfg.RaycastTargetCfg(
+                prim_expr="/World/envs/env_.*/Robot/RR_.*/visuals", is_shared=True, track_mesh_transforms=True
+            ),
         ],
         pattern_cfg=patterns.PinholeCameraPatternCfg(
             focal_length=24.0,
