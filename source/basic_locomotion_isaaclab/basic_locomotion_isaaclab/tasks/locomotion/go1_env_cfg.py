@@ -450,6 +450,57 @@ class Go1RoughVisionEnvCfg(Go1RoughBlindEnvCfg):
 
         self.feet_edge_reward_scale = -1.0
 
+    # Play-time terrain override (mirrors Go1RoughVisionTiledEnvCfg): select a single
+    # terrain type / difficulty, e.g. `--terrain stairs --difficulty 0.467` plays on 12 cm
+    # stairs (step_height = 0.05 + difficulty*0.15). Only applied when the play script sets
+    # these; teacher training keeps GO1_ROUGH_TERRAINS_CFG (curriculum=True) unchanged.
+    terrain_type: str = "rough"
+    difficulty: float | None = None
+
+    def rebuild_terrain(self) -> None:
+        if self.terrain_type == "rough":
+            sub_terrains = GO1_ROUGH_TERRAINS_CFG.sub_terrains
+        elif self.terrain_type == "flat":
+            sub_terrains = {"flat": terrain_gen.MeshPlaneTerrainCfg(proportion=1.0)}
+        elif self.terrain_type == "stairs":
+            sub_terrains = {
+                "pyramid_stairs": terrain_gen.MeshPyramidStairsTerrainCfg(
+                    proportion=0.5, step_height_range=(0.05, 0.20), step_width=0.3,
+                    platform_width=3.0, border_width=1.0, holes=False,
+                ),
+                "pyramid_stairs_inv": terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
+                    proportion=0.5, step_height_range=(0.05, 0.20), step_width=0.3,
+                    platform_width=3.0, border_width=1.0, holes=False,
+                ),
+            }
+        elif self.terrain_type == "slope":
+            sub_terrains = {
+                "hf_pyramid_slope": terrain_gen.HfPyramidSlopedTerrainCfg(
+                    proportion=0.5, slope_range=(0.2, 0.4), platform_width=2.0, border_width=0.25
+                ),
+                "hf_pyramid_slope_inv": terrain_gen.HfInvertedPyramidSlopedTerrainCfg(
+                    proportion=0.5, slope_range=(0.2, 0.4), platform_width=2.0, border_width=0.25
+                ),
+            }
+        else:
+            raise ValueError(f"Unknown terrain_type: {self.terrain_type}")
+        difficulty_range = (
+            (self.difficulty, self.difficulty) if self.difficulty is not None else (0.0, 1.0)
+        )
+        self.terrain.terrain_generator = TerrainGeneratorCfg(
+            curriculum=False,  # fixed terrain for play (training keeps curriculum=True)
+            size=GO1_ROUGH_TERRAINS_CFG.size,
+            border_width=GO1_ROUGH_TERRAINS_CFG.border_width,
+            num_rows=GO1_ROUGH_TERRAINS_CFG.num_rows,
+            num_cols=GO1_ROUGH_TERRAINS_CFG.num_cols,
+            horizontal_scale=GO1_ROUGH_TERRAINS_CFG.horizontal_scale,
+            vertical_scale=GO1_ROUGH_TERRAINS_CFG.vertical_scale,
+            slope_threshold=GO1_ROUGH_TERRAINS_CFG.slope_threshold,
+            use_cache=GO1_ROUGH_TERRAINS_CFG.use_cache,
+            sub_terrains=sub_terrains,
+            difficulty_range=difficulty_range,
+        )
+
     use_vision = True
 
     # we add a height scanner for perceptive locomotion

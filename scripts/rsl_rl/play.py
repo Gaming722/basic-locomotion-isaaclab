@@ -34,6 +34,20 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--terrain",
+    type=str,
+    default=None,
+    help="Single-type play terrain (rough|stairs|slope|flat). Only applied if the env cfg has a "
+         "rebuild_terrain() method.",
+)
+parser.add_argument(
+    "--difficulty",
+    type=float,
+    default=None,
+    help="Fixed terrain difficulty 0-1 (e.g. --terrain stairs --difficulty 0.467 -> 12 cm steps; "
+         "0.667 -> 15 cm).",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -91,6 +105,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     agent_cfg: RslRlBaseRunnerCfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+
+    # apply a single-type / fixed-difficulty play terrain if the env supports it
+    if args_cli.terrain is not None and hasattr(env_cfg, "rebuild_terrain"):
+        env_cfg.terrain_type = args_cli.terrain
+        if args_cli.difficulty is not None:
+            env_cfg.difficulty = args_cli.difficulty
+        env_cfg.rebuild_terrain()
+        print(f"[INFO] Play terrain: {env_cfg.terrain_type} difficulty={env_cfg.difficulty}")
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
