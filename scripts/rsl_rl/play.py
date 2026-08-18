@@ -95,6 +95,47 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import basic_locomotion_isaaclab.tasks  # noqa: F401
 
 
+def _install_env_switch(env):
+    """Register keyboard shortcuts to switch which env the viewport camera follows.
+
+    E / Q = next / previous env, 1-9 = jump to env 0-8. Re-centres the camera on the
+    selected env via viewport_camera_controller.set_view_env_index. Only active when a
+    display is present (local play); headless runs just warn.
+    """
+    env_unwrapped = env.unwrapped
+    controller = getattr(env_unwrapped, "viewport_camera_controller", None)
+    if controller is None:
+        print("[INFO] env-switch keys disabled (env has no viewport_camera_controller).")
+        return
+    try:
+        from omni.appwindow import get_default_app_window
+        import carb
+
+        num_envs = env_unwrapped.num_envs
+        _input_iface = carb.input.acquire_input_interface()
+        _keyboard = get_default_app_window().get_keyboard()
+
+        def _on_key(event, *_):
+            if event.type != carb.input.KeyboardEventType.KEY_PRESS:
+                return
+            name = event.input.name
+            cur = controller.cfg.env_index
+            if name == "E":
+                controller.set_view_env_index((cur + 1) % num_envs)
+            elif name == "Q":
+                controller.set_view_env_index((cur - 1) % num_envs)
+            elif name.isdigit() and 1 <= int(name) <= 9:
+                controller.set_view_env_index(int(name) - 1)
+            else:
+                return
+            print(f"[INFO] camera -> env {controller.cfg.env_index}")
+
+        _input_iface.subscribe_to_keyboard_events(_keyboard, _on_key)
+        print("[INFO] env-switch keys on: E/Q = next/prev env, 1-9 = jump to env N-1.")
+    except Exception as e:  # headless / no window
+        print(f"[WARN] env-switch keys unavailable ({e}).")
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with RSL-RL agent."""
@@ -105,6 +146,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     agent_cfg: RslRlBaseRunnerCfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+
+    # clamp the viewer env_index to the actual number of envs (config may default to 500)
+    if hasattr(env_cfg, "viewer"):
+        env_cfg.viewer.env_index = max(0, min(env_cfg.viewer.env_index, env_cfg.scene.num_envs - 1))
 
     # apply a single-type / fixed-difficulty play terrain if the env supports it
     if args_cli.terrain is not None and hasattr(env_cfg, "rebuild_terrain"):
@@ -159,6 +204,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+
+    # interactive viewport camera: switch which env is followed (E/Q, 1-9)
+    _install_env_switch(env)
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     # load previously trained model
