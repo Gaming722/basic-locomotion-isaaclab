@@ -273,6 +273,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # reset environment
     obs = env.get_observations()
+    if args_cli.cmd and hasattr(env.unwrapped, "_commands"):
+        print(f"[INFO] actual commands[:3] = {env.unwrapped._commands[:3].cpu().numpy().tolist()}")
     timestep = 0
     # simulate environment
     while simulation_app.is_running():
