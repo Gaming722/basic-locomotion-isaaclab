@@ -399,7 +399,8 @@ def main():
         vcam.distance = 3.2
         vcam.azimuth = 180.0
         vcam.elevation = -18.0
-        video_path = os.path.join(run_dir, "videos", "dagger_play", "mj_sim2sim_go1.mp4")
+        ckpt_tag = os.path.splitext(os.path.basename(ckpt_path))[0]   # e.g. dagger_policy, dagger_policy_raycaster
+        video_path = os.path.join(run_dir, "videos", "dagger_play", f"mj_sim2sim_go1_{ckpt_tag}.mp4")
         os.makedirs(os.path.dirname(video_path), exist_ok=True)
 
     for p in range(N_policy):
