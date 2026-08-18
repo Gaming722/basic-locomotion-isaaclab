@@ -167,8 +167,41 @@ def build_go1_scene_xml(scene="flat", step_rise=0.07, step_tread=0.25, n_steps=1
         # flat ground under the robot + safety floor
         geoms += '<geom name="flat_approach" type="plane" pos="0 0 0" size="8 20 0.05" material="groundplane"/>\n'
         geoms += '<geom name="safety_floor" type="plane" size="40 40 0.05" pos="0 0 -2.0"/>\n'
+    elif scene == "course":
+        # flat start -> stairs up/over/down -> perlin rough terrain, all along +x.
+        geoms = '<geom name="ground" type="plane" size="20 20 0.1" material="groundplane"/>\n'
+        boxes = []
+        x = step_tread / 2.0
+        for s in range(1, n_steps + 1):
+            z = s * step_rise
+            boxes.append(f'<geom type="box" pos="{x} 0 {z / 2.0}" size="{step_tread / 2.0} {width / 2.0} {z / 2.0}" '
+                         f'material="groundplane"/>\n')
+            x += step_tread
+        top_z = n_steps * step_rise
+        boxes.append(f'<geom type="box" pos="{x + step_tread / 2.0} 0 {top_z / 2.0}" '
+                     f'size="{step_tread} {width / 2.0} {top_z / 2.0}" material="groundplane"/>\n')
+        x += step_tread
+        for s in range(n_steps, 0, -1):
+            z = s * step_rise
+            boxes.append(f'<geom type="box" pos="{x + step_tread / 2.0} 0 {z / 2.0}" '
+                         f'size="{step_tread / 2.0} {width / 2.0} {z / 2.0}" material="groundplane"/>\n')
+            x += step_tread
+        geoms += "".join(boxes)
+        # perlin rough terrain after the stairs, entry edge flush with the ground
+        nrow, ncol = 100, 100
+        png = os.path.join(HERE, "assets", "go1_course_perlin.png")
+        os.makedirs(os.path.dirname(png), exist_ok=True)
+        Hf = _fbm_values((nrow, ncol), amplitudes=(0.25, 0.25, 0.2, 0.18, 0.12))
+        Hf[:, 0] = 0.0   # hfield starts at height 0 where the robot steps off the plane
+        cv2.imwrite(png, (Hf * 255.0).astype(np.uint8))
+        perlin_x_half = 3.5
+        perlin_x_center = x + 1.0 + perlin_x_half   # small flat gap after the stairs
+        assets += (f'<hfield name="perlin" size="{perlin_x_half} 8 0.001 {perlin_amp}" '
+                   f'nrow="{nrow}" ncol="{ncol}" file="{png}"/>\n')
+        geoms += f'<geom type="hfield" hfield="perlin" pos="{perlin_x_center} 0 0" size="1 1 1" material="groundplane"/>\n'
+        geoms += '<geom name="safety_floor" type="plane" size="40 40 0.05" pos="0 0 -2.0"/>\n'
     else:
-        raise ValueError(f"Unknown scene '{scene}' (flat|stairs|perlin)")
+        raise ValueError(f"Unknown scene '{scene}' (flat|stairs|perlin|course)")
 
     # bake the depth camera into the XML as the FIRST child of the trunk body so its
     # pose (0.26, 0, 0.12) is in the trunk frame and it tracks the robot (a camera at
@@ -266,7 +299,9 @@ def main():
                         help="path to dagger_policy.pt (Tiled or RayCaster student checkpoint)")
     parser.add_argument("--policy_steps", type=int, default=1000,
                         help="number of policy steps to run (default: 1000, -1 = until viewer closed)")
-    parser.add_argument("--scene", default="flat", help="terrain: flat|stairs|perlin (default: flat)")
+    parser.add_argument("--scene", default="flat",
+                        help="terrain: flat|stairs|perlin|course (default: flat; course = flat start -> "
+                             "stairs up/over/down -> perlin rough)")
     parser.add_argument("--step_rise", type=float, default=0.07, help="stair step height (m)")
     parser.add_argument("--step_tread", type=float, default=0.25, help="stair step depth (m)")
     parser.add_argument("--n_steps", type=int, default=12, help="stair steps up (then down)")
