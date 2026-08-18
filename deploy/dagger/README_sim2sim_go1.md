@@ -27,8 +27,9 @@ python deploy/dagger/play_mujoco_dagger_go1.py \
 | `--scene` | 说明 |
 |---|---|
 | `flat` | 平地 |
-| `stairs` | 上 12 阶→平台→下 12 阶（`--step_rise/--step_tread/--n_steps/--stair_width` 可调）|
+| `stairs` | 上 12 阶→平台→下 12 阶（`--step_rise` 默认 0.15m、`--stair_width` 默认 6m，可调）|
 | `perlin` | 分形噪声 hfield（`--perlin_amp`）|
+| `course` | 平地起步 → 楼梯上/下 → perlin 崎岖地形（`--cmd "0.5 0 0"` 纯前向）|
 
 ## 关键实现点
 
