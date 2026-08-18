@@ -130,7 +130,10 @@ def build_go1_scene_xml(scene="flat", step_rise=0.07, step_tread=0.25, n_steps=1
     if scene == "flat":
         geoms = '<geom name="ground" type="plane" size="20 20 0.1" material="groundplane"/>\n'
     elif scene == "stairs":
-        # ascending staircase, flat top, descending (up-over-down).
+        # ascending staircase, flat top, descending (up-over-down). A full ground
+        # plane under everything so the robot starts on level ground and lands on
+        # level ground after the descent; the stair boxes sit on top of the plane.
+        geoms = '<geom name="ground" type="plane" size="20 20 0.1" material="groundplane"/>\n'
         boxes = []
         n_up = n_steps
         x = step_tread / 2.0
@@ -149,7 +152,7 @@ def build_go1_scene_xml(scene="flat", step_rise=0.07, step_tread=0.25, n_steps=1
             boxes.append(f'<geom type="box" pos="{x + step_tread / 2.0} 0 {z / 2.0}" '
                          f'size="{step_tread / 2.0} {width / 2.0} {z / 2.0}" material="groundplane"/>\n')
             x += step_tread
-        geoms = "".join(boxes)
+        geoms += "".join(boxes)   # keep the ground plane, append the stair boxes
     elif scene == "perlin":
         nrow, ncol = 100, 100
         png = os.path.join(HERE, "assets", "go1_perlin.png")
@@ -325,8 +328,18 @@ def main():
     assert depth_cam_id >= 0, "depth_cam camera missing from scene XML"
     cam = MujocoDepthCamera(model, data, depth_cam_id, width=DEPTH_W, height=DEPTH_H)
 
-    # --- init pose: GO1 home (hip 0, thigh 0.9, calf -1.8), trunk 0.3m up ---
-    data.qpos[:3] = [0.0, 0.0, 0.3]
+    # --- actuator -> policy-joint mapping (per-leg actuators vs hip/thigh/calf blocks) ---
+    # go1.xml actuator names are "{joint}" (e.g. "FR_hip" controls "FR_hip_joint").
+    joint_of_actuator = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, i) + "_joint"
+                         for i in range(model.nu)]
+    policy_idx = {nm: i for i, nm in enumerate(DESIRED_ORDER)}
+    # ctrl[actuator_i] gets target_pos[policy_idx[joint_of_actuator[i]]]
+
+    # --- init + settle: spawn feet clear of the terrain and let the robot drop and
+    # rest in the home pose before the policy takes over. Starting embedded in the
+    # terrain (feet are below ground at trunk 0.3) made the robot tip over the stair
+    # edge and fall through on the stairs scene.
+    data.qpos[:3] = [0.0, 0.0, 0.4]
     data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
     for nm, val in zip(DESIRED_ORDER, DEFAULT_JOINT):
         jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, nm)
@@ -334,13 +347,14 @@ def main():
             data.qpos[model.jnt_qposadr[jid]] = val
     data.qvel[:] = 0.0
     mujoco.mj_forward(model, data)
-
-    # --- actuator -> policy-joint mapping (per-leg actuators vs hip/thigh/calf blocks) ---
-    # go1.xml actuator names are "{joint}" (e.g. "FR_hip" controls "FR_hip_joint").
-    joint_of_actuator = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, i) + "_joint"
-                         for i in range(model.nu)]
-    policy_idx = {nm: i for i, nm in enumerate(DESIRED_ORDER)}
-    # ctrl[actuator_i] gets target_pos[policy_idx[joint_of_actuator[i]]]
+    for _ in range(1500):                                  # 3 s at dt=0.002, hold home pose
+        for i, jn in enumerate(joint_of_actuator):
+            if jn in policy_idx:
+                data.ctrl[i] = DEFAULT_JOINT[policy_idx[jn]]
+        mujoco.mj_step(model, data)
+    data.qvel[:] = 0.0
+    mujoco.mj_forward(model, data)
+    print(f"[INFO] settled trunk z={data.xpos[model.body('trunk').id, 2]:.3f}")
 
     # --- state buffers (newest at END, matching training) ---
     S = md["common_obs_size"] // tcfg["history_length"]      # 49 (no base_lin_vel)
