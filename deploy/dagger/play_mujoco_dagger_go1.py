@@ -272,8 +272,15 @@ def main():
     parser.add_argument("--viewer", action="store_true",
                         help="open an interactive mujoco viewer + live depth window (needs a display). "
                              "Keys: Up/Down=vx Left/Right(+A/D)=vy Q/E=wz (+-0.1/press), V=stop C=cruise ESC=quit")
+    parser.add_argument("--cmd", default="0.0 0.0 0.0",
+                        help="fixed velocity command 'vx vy wz' for headless runs (default 0 0 0); "
+                             "with --viewer the keyboard overrides it")
     parser.add_argument("--no_video", action="store_true", help="skip dual-pane mp4 recording")
     args = parser.parse_args()
+    try:
+        _vx, _vy, _wz = (float(x) for x in args.cmd.split())
+    except ValueError:
+        raise SystemExit("--cmd must be 'vx vy wz' (three floats)")
 
     ckpt_path = os.path.abspath(args.ckpt)
     assert os.path.exists(ckpt_path), f"checkpoint not found: {ckpt_path}"
@@ -341,7 +348,7 @@ def main():
     hist = np.zeros((depth_len + delay, 1, DEPTH_H, DEPTH_W), dtype=np.float16)
     phase = np.array([0.0, 0.5, 0.5, 0.0])                   # FL, FR, RL, RR
     past_actions = np.zeros(model.nu, dtype=np.float32)
-    ctl = {"vx": 0.0, "vy": 0.0, "wz": 0.0}
+    ctl = {"vx": _vx, "vy": _vy, "wz": _wz}   # headless: fixed --cmd; --viewer keyboard overrides
     last_cmd = None
 
     sim_dt = model.opt.timestep
@@ -431,7 +438,10 @@ def main():
             d_show = np.clip(depth_t.squeeze(0).squeeze(0).numpy(), 0.0, 2.0) / 2.0
             d_gray = (255.0 * (1.0 - d_show)).astype(np.uint8)
             d_bgr = cv2.cvtColor(d_gray, cv2.COLOR_GRAY2BGR)
-            d_resized = cv2.resize(d_bgr, (480, 280), interpolation=cv2.INTER_CUBIC)
+            # preserve aspect and match the rgb pane height (240) so hstack works
+            h = rgb.shape[0]
+            w = int(round(d_bgr.shape[1] * h / d_bgr.shape[0]))
+            d_resized = cv2.resize(d_bgr, (w, h), interpolation=cv2.INTER_CUBIC)
             frame = np.hstack([rgb, d_resized])
             if writer is None:
                 writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*"mp4v"), 50,
