@@ -302,8 +302,8 @@ def main():
     parser.add_argument("--scene", default="flat",
                         help="terrain: flat|stairs|perlin|course (default: flat; course = flat start -> "
                              "stairs up/over/down -> perlin rough)")
-    parser.add_argument("--step_rise", type=float, default=0.15, help="stair step height (m, default 0.15)")
-    parser.add_argument("--step_tread", type=float, default=0.25, help="stair step depth (m)")
+    parser.add_argument("--step_rise", type=float, default=0.12, help="stair step height (m, default 0.12)")
+    parser.add_argument("--step_tread", type=float, default=0.30, help="stair step depth (m, default 0.30 = training step_width)")
     parser.add_argument("--n_steps", type=int, default=12, help="stair steps up (then down)")
     parser.add_argument("--stair_width", type=float, default=6.0, help="stair width (m, default 6.0)")
     parser.add_argument("--perlin_amp", type=float, default=0.18, help="perlin amplitude (m)")
