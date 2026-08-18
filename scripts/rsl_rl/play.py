@@ -48,6 +48,13 @@ parser.add_argument(
     help="Fixed terrain difficulty 0-1 (e.g. --terrain stairs --difficulty 0.467 -> 12 cm steps; "
          "0.667 -> 15 cm).",
 )
+parser.add_argument(
+    "--cmd",
+    type=str,
+    default=None,
+    help="Fixed velocity command 'vx vy wz' for all envs (overrides the env's random command "
+         "generator, e.g. --cmd \"0.5 0 0\" for constant forward).",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -207,6 +214,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # interactive viewport camera: switch which env is followed (E/Q, 1-9)
     _install_env_switch(env)
+
+    # fixed velocity command for all envs if requested (replaces the random generator)
+    if args_cli.cmd:
+        try:
+            _vx, _vy, _wz = (float(x) for x in args_cli.cmd.split())
+        except ValueError:
+            raise SystemExit("--cmd must be 'vx vy wz' (three floats)")
+        if hasattr(env.unwrapped, "_commands"):
+            import basic_locomotion_isaaclab.tasks.custom_events as _ce
+
+            def _fixed_random_commands(env_obj, env_ids=None):
+                env_obj._commands[:, 0] = _vx
+                env_obj._commands[:, 1] = _vy
+                env_obj._commands[:, 2] = _wz
+
+            _ce._get_new_random_commands = _fixed_random_commands
+            print(f"[INFO] Fixed velocity command: {_vx:.2f} {_vy:.2f} {_wz:.2f} (all envs)")
+        else:
+            print(f"[WARN] --cmd ignored: env has no _commands buffer.")
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     # load previously trained model
