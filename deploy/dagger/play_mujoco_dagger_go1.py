@@ -64,7 +64,10 @@ DEPTH_W, DEPTH_H = 240, 140
 TRAIN_DT = 0.005              # IsaacLab sim.dt
 GO1_MIN_DELAY = 0             # actuator command delay (physics steps), randomized per env
 GO1_MAX_DELAY = 2
-GO1_SOFT_LIMIT = 0.95         # soft_joint_pos_limit_factor
+# NOTE: soft_joint_pos_limit_factor=0.95 is NOT a command clamp in training -- it only feeds
+# the joint_pos_limits reward / joint_pos_out_of_limits termination (JointPositionActionCfg
+# sets the target directly via set_joint_position_target with no clamp). So we do NOT replicate
+# it here; the MuJoCo position actuator's ctrlrange is the real hard joint limit.
 
 
 # --- XML building (m1-style: extract inner, absolute meshdir, inject terrain+camera) ----
@@ -317,6 +320,9 @@ def main():
                         help="position-actuator stiffness (default 30 = IsaacLab training stiffness; "
                              "100 = mujoco_menagerie model default). kp=30 may be too soft for the "
                              "menagerie mass -> legs flop -> tips over on stairs; try --kp 100.")
+    parser.add_argument("--no_act_delay", action="store_true",
+                        help="disable the actuator command delay (training uses DelayedPDActuator "
+                             "0-2 physics steps; use for an ablation)")
     parser.add_argument("--perlin_amp", type=float, default=0.18, help="perlin amplitude (m)")
     parser.add_argument("--viewer", action="store_true",
                         help="open an interactive mujoco viewer + live depth window (needs a display). "
@@ -423,19 +429,10 @@ def main():
     base_contact = 0
     device = "cpu"
 
-    # --- training-aligned dynamics extras ---
-    # actuator command delay (DelayedPDActuator min_delay..max_delay physics steps),
-    # sampled once like the per-env randomization in training
-    act_delay = int(np.random.randint(GO1_MIN_DELAY, GO1_MAX_DELAY + 1))
+    # --- actuator command delay (DelayedPDActuator min_delay..max_delay physics steps) ---
+    # sampled once like the per-env randomization in training; --no_act_delay disables it
+    act_delay = 0 if args.no_act_delay else int(np.random.randint(GO1_MIN_DELAY, GO1_MAX_DELAY + 1))
     delay_line = np.tile(DEFAULT_JOINT, (GO1_MAX_DELAY + 1, 1)).astype(np.float32)
-    # soft joint limits: clamp the commanded target to soft_joint_pos_limit_factor * range
-    soft_lo = {}
-    soft_hi = {}
-    for jn in DESIRED_ORDER:
-        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, jn)
-        lo, hi = model.jnt_range[jid]
-        soft_lo[jn] = GO1_SOFT_LIMIT * lo
-        soft_hi[jn] = GO1_SOFT_LIMIT * hi
     print(f"[INFO] actuator delay={act_delay} phys-steps, policy_every={policy_every} @ dt={sim_dt}")
 
     # --- optional viewer ---
@@ -546,14 +543,13 @@ def main():
 
         for _ in range(policy_every):
             # actuator command delay: apply the target from `act_delay` physics steps ago
+            # (matches DelayedPDActuator; no soft-limit clamp -- training doesn't clamp targets)
             delay_line = np.roll(delay_line, 1, axis=0)
             delay_line[0] = target_pos
             ctrl_target = delay_line[act_delay]
             for i, jn in enumerate(joint_of_actuator):
                 if jn in policy_idx:
-                    pi = policy_idx[jn]
-                    # soft joint limit clamp (soft_joint_pos_limit_factor * range)
-                    data.ctrl[i] = np.clip(ctrl_target[pi], soft_lo[jn], soft_hi[jn])
+                    data.ctrl[i] = ctrl_target[policy_idx[jn]]
             mujoco.mj_step(model, data)
 
         if args.viewer:
