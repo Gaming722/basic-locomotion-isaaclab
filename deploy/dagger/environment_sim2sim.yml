@@ -1,0 +1,21 @@
+# Conda env for the GO1 DAgger depth sim2sim (deploy/dagger/*).
+#
+# One-shot setup:
+#   bash deploy/dagger/setup_sim2sim_env.sh            # default env name: sim2sim_go1
+#   bash deploy/dagger/setup_sim2sim_env.sh myenv      # custom name
+#
+# Unlike the Aliengo/M1 sim2sim (which pull in gym-quadruped), the GO1 sim2sim uses a
+# copy of mujoco_menagerie's unitree_go1/go1.xml committed under
+# deploy/mujoco_models/go1/, so gym_quadruped is NOT needed. torch is installed
+# separately by setup_sim2sim_env.sh as a lightweight CPU-only build (step 2).
+name: sim2sim_go1
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - mujoco==3.11.0        # includes mujoco.viewer (--viewer needs MUJOCO_GL=glfw)
+      - opencv-python          # perlin hfield PNG generation
+      - pyyaml
+      - numpy
