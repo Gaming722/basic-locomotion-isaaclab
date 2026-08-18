@@ -373,8 +373,10 @@ def main():
     # --- init + settle: spawn feet clear of the terrain and let the robot drop and
     # rest in the home pose before the policy takes over. Starting embedded in the
     # terrain (feet are below ground at trunk 0.3) made the robot tip over the stair
-    # edge and fall through on the stairs scene.
-    data.qpos[:3] = [0.0, 0.0, 0.4]
+    # edge and fall through on the stairs scene. For stairs/course, spawn 1 m back on
+    # the flat approach so the robot walks onto the first step from level ground.
+    spawn_x = -1.0 if args.scene in ("stairs", "course") else 0.0
+    data.qpos[:3] = [spawn_x, 0.0, 0.4]
     data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
     for nm, val in zip(DESIRED_ORDER, DEFAULT_JOINT):
         jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, nm)
@@ -445,7 +447,10 @@ def main():
 
         quat = data.qpos[3:7]
         R = data.xmat[base_id].reshape(3, 3)
-        ang_vel_b = data.qvel[3:6]                            # free-joint qvel is body-frame angular
+        # MuJoCo free-joint qvel[3:6] is the WORLD-frame angular velocity; IsaacLab's
+        # root_ang_vel_b is body-frame, so rotate into the trunk frame (verified by test:
+        # roll 90 deg + world-z rotation -> qvel=[0,0,1], body-frame=[0,1,0]).
+        ang_vel_b = R.T @ data.qvel[3:6]
         grav_b = _projected_gravity(quat)
         jp = np.array([data.qpos[model.jnt_qposadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, nm)]]
                        for nm in DESIRED_ORDER])
