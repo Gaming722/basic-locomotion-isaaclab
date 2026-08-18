@@ -343,10 +343,10 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
 
     # Tracking reward scale
     lin_vel_reward_scale = 2.0
-    yaw_rate_reward_scale = 0.5
-    z_vel_reward_scale = -2.0
-    ang_vel_reward_scale = -0.25
-    orientation_reward_scale = -5.0
+    yaw_rate_reward_scale = 1.5        # raise: discourage the "turn to avoid descent" evasion
+    z_vel_reward_scale = -0.5          # lower: allow the vertical motion needed to descend stairs/slopes
+    ang_vel_reward_scale = -0.1        # lower: allow pitch/roll motion while descending
+    orientation_reward_scale = -1.5    # lower: don't over-penalize pitch mismatch at step edges
     height_reward_scale = 1.0
     
 
@@ -399,7 +399,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
 
 
     # Contact suggestion reward scale
-    periodic_contact_suggestion_reward_scale = 0.25  # aligned with Aliengo
+    periodic_contact_suggestion_reward_scale = 0.1  # lowered: reduce the single-leg double-tap (蜻蜓点水)
     # Desired step freq and duty factor (if periodic gait contact suggestion is used)
     desired_step_freq = 1.4
     desired_duty_factor = 0.65
