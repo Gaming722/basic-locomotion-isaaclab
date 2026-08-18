@@ -60,6 +60,12 @@ CAM_PITCH_DEG = 30.0
 CAM_FOVY = 58.0               # vertical FOV deg
 DEPTH_W, DEPTH_H = 240, 140
 
+# Training dynamics parameters to align (go1_asset.py DelayedPDActuatorCfg).
+TRAIN_DT = 0.005              # IsaacLab sim.dt
+GO1_MIN_DELAY = 0             # actuator command delay (physics steps), randomized per env
+GO1_MAX_DELAY = 2
+GO1_SOFT_LIMIT = 0.95         # soft_joint_pos_limit_factor
+
 
 # --- XML building (m1-style: extract inner, absolute meshdir, inject terrain+camera) ----
 
@@ -364,6 +370,8 @@ def main():
                               n_steps=args.n_steps, width=args.stair_width, perlin_amp=args.perlin_amp,
                               kp=args.kp)
     model = mujoco.MjModel.from_xml_string(xml)
+    # align physics timestep with training (sim.dt = 0.005)
+    model.opt.timestep = TRAIN_DT
     data = mujoco.MjData(model)
     depth_cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "depth_cam")
     assert depth_cam_id >= 0, "depth_cam camera missing from scene XML"
@@ -390,14 +398,14 @@ def main():
             data.qpos[model.jnt_qposadr[jid]] = val
     data.qvel[:] = 0.0
     mujoco.mj_forward(model, data)
-    for _ in range(1500):                                  # 3 s at dt=0.002, hold home pose
+    for _ in range(int(3.0 / model.opt.timestep)):         # 3 s hold home pose
         for i, jn in enumerate(joint_of_actuator):
             if jn in policy_idx:
                 data.ctrl[i] = DEFAULT_JOINT[policy_idx[jn]]
         mujoco.mj_step(model, data)
     data.qvel[:] = 0.0
     mujoco.mj_forward(model, data)
-    print(f"[INFO] settled trunk z={data.xpos[model.body('trunk').id, 2]:.3f}")
+    print(f"[INFO] settled trunk z={data.xpos[model.body('trunk').id, 2]:.3f} (dt={model.opt.timestep})")
 
     # --- state buffers (newest at END, matching training) ---
     S = md["common_obs_size"] // tcfg["history_length"]      # 49 (no base_lin_vel)
@@ -414,6 +422,21 @@ def main():
     N_policy = args.policy_steps if args.policy_steps >= 0 else int(1e9)
     base_contact = 0
     device = "cpu"
+
+    # --- training-aligned dynamics extras ---
+    # actuator command delay (DelayedPDActuator min_delay..max_delay physics steps),
+    # sampled once like the per-env randomization in training
+    act_delay = int(np.random.randint(GO1_MIN_DELAY, GO1_MAX_DELAY + 1))
+    delay_line = np.tile(DEFAULT_JOINT, (GO1_MAX_DELAY + 1, 1)).astype(np.float32)
+    # soft joint limits: clamp the commanded target to soft_joint_pos_limit_factor * range
+    soft_lo = {}
+    soft_hi = {}
+    for jn in DESIRED_ORDER:
+        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, jn)
+        lo, hi = model.jnt_range[jid]
+        soft_lo[jn] = GO1_SOFT_LIMIT * lo
+        soft_hi[jn] = GO1_SOFT_LIMIT * hi
+    print(f"[INFO] actuator delay={act_delay} phys-steps, policy_every={policy_every} @ dt={sim_dt}")
 
     # --- optional viewer ---
     viewer = None
@@ -522,9 +545,15 @@ def main():
         past_actions = actions.copy()
 
         for _ in range(policy_every):
+            # actuator command delay: apply the target from `act_delay` physics steps ago
+            delay_line = np.roll(delay_line, 1, axis=0)
+            delay_line[0] = target_pos
+            ctrl_target = delay_line[act_delay]
             for i, jn in enumerate(joint_of_actuator):
                 if jn in policy_idx:
-                    data.ctrl[i] = target_pos[policy_idx[jn]]
+                    pi = policy_idx[jn]
+                    # soft joint limit clamp (soft_joint_pos_limit_factor * range)
+                    data.ctrl[i] = np.clip(ctrl_target[pi], soft_lo[jn], soft_hi[jn])
             mujoco.mj_step(model, data)
 
         if args.viewer:
