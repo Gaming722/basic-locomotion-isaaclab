@@ -63,9 +63,10 @@ DEPTH_W, DEPTH_H = 240, 140
 
 # --- XML building (m1-style: extract inner, absolute meshdir, inject terrain+camera) ----
 
-def _go1_xml_inner():
+def _go1_xml_inner(kp: float = 30.0):
     """Return the go1.xml body inside <mujoco>..</mujoco> with absolute meshdir
-    and training-matched position-actuator stiffness (kp 100 -> 30)."""
+    and the position-actuator stiffness set to ``kp`` (default 30 to match IsaacLab
+    training stiffness; 100 = the mujoco_menagerie model's own tuned default)."""
     txt = open(GO1_XML).read()
     i = txt.find("<mujoco")
     j = txt.find(">", i) + 1
@@ -73,9 +74,9 @@ def _go1_xml_inner():
     inner = txt[j:k]
     mdir = os.path.join(os.path.dirname(GO1_XML), "assets")
     inner = re.sub(r'meshdir="[^"]*"', f'meshdir="{mdir}"', inner)
-    # align the position-actuator servo with training stiffness=30 (damping/armature
-    # in the XML defaults already match GO1_DAMPING=2 / GO1_ARMATURE=0.01).
-    inner = re.sub(r'<position kp="100"', '<position kp="30"', inner)
+    # override the position-actuator servo stiffness (damping/armature in the XML
+    # defaults already match GO1_DAMPING=2 / GO1_ARMATURE=0.01).
+    inner = re.sub(r'<position kp="100"', f'<position kp="{kp}"', inner)
     return inner
 
 
@@ -113,10 +114,10 @@ def _camera_quat():
     return q
 
 
-def build_go1_scene_xml(scene="flat", step_rise=0.07, step_tread=0.25, n_steps=12,
-                        width=2.0, perlin_amp=0.18):
+def build_go1_scene_xml(scene="flat", step_rise=0.12, step_tread=0.30, n_steps=12,
+                        width=6.0, perlin_amp=0.18, kp=30.0):
     """Compose a scene XML: go1 robot + terrain + baked depth camera."""
-    inner = _go1_xml_inner()
+    inner = _go1_xml_inner(kp=kp)
     cam_q = " ".join(f"{v:.6f}" for v in _camera_quat())
 
     assets = (
@@ -306,6 +307,10 @@ def main():
     parser.add_argument("--step_tread", type=float, default=0.30, help="stair step depth (m, default 0.30 = training step_width)")
     parser.add_argument("--n_steps", type=int, default=12, help="stair steps up (then down)")
     parser.add_argument("--stair_width", type=float, default=6.0, help="stair width (m, default 6.0)")
+    parser.add_argument("--kp", type=float, default=30.0,
+                        help="position-actuator stiffness (default 30 = IsaacLab training stiffness; "
+                             "100 = mujoco_menagerie model default). kp=30 may be too soft for the "
+                             "menagerie mass -> legs flop -> tips over on stairs; try --kp 100.")
     parser.add_argument("--perlin_amp", type=float, default=0.18, help="perlin amplitude (m)")
     parser.add_argument("--viewer", action="store_true",
                         help="open an interactive mujoco viewer + live depth window (needs a display). "
@@ -356,7 +361,8 @@ def main():
 
     # --- build + load the scene (go1 + terrain + depth cam) ---
     xml = build_go1_scene_xml(scene=args.scene, step_rise=args.step_rise, step_tread=args.step_tread,
-                              n_steps=args.n_steps, width=args.stair_width, perlin_amp=args.perlin_amp)
+                              n_steps=args.n_steps, width=args.stair_width, perlin_amp=args.perlin_amp,
+                              kp=args.kp)
     model = mujoco.MjModel.from_xml_string(xml)
     data = mujoco.MjData(model)
     depth_cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "depth_cam")
