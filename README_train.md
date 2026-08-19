@@ -47,6 +47,27 @@ python scripts/rsl_rl/play.py --task=Locomotion-Aliengo-Flat --num_envs=16
 python scripts/rsl_rl/play.py --task=Locomotion-Aliengo-Rough-Blind --num_envs=16
 ```
 
+- GO1 teacher play on a **controlled terrain** (e.g. verify stair-climbing on 12 cm stairs with a
+  fixed forward command):
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task=Locomotion-Go1-Rough-Vision \
+  --checkpoint=tested_policies/go1/rough_vision/model_70800.pt \
+  --terrain stairs --difficulty 0.467 \
+  --cmd "0.5 0 0" --num_envs 8
+```
+
+  Play-time options (`scripts/rsl_rl/play.py`):
+  - `--terrain <rough|stairs|slope|flat>`: single-type terrain (applied only if the env cfg has
+    `rebuild_terrain()`, i.e. the GO1 teacher env; other tasks ignore it).
+  - `--difficulty <0.0-1.0>`: fixed terrain difficulty. For stairs, `step_height = 0.05 + difficulty*0.15`,
+    so 10 cm -> 0.333, 12 cm -> 0.467, 15 cm -> 0.667, 20 cm -> 1.0.
+  - `--cmd "vx vy wz"`: fixed velocity command for all envs (replaces the random command generator,
+    e.g. `--cmd "0.5 0 0"` for constant forward).
+  - `--num_envs <N>`: fewer envs for local visualization (default 4096).
+  - Viewport keys during play: `E`/`Q` = next / previous env, `1`-`9` = jump to env N-1.
+
 
 
 ## Use AMP, Morphological Symmetries, DAGGER or Depth to Heightmap
