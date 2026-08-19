@@ -399,7 +399,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
 
 
     # Contact suggestion reward scale
-    periodic_contact_suggestion_reward_scale = 0.1  # lowered: reduce the single-leg double-tap (蜻蜓点水)
+    periodic_contact_suggestion_reward_scale = 0.25  # restored: keeps the periodic gait rhythm + swing clearance
     # Desired step freq and duty factor (if periodic gait contact suggestion is used)
     desired_step_freq = 1.4
     desired_duty_factor = 0.65
