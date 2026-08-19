@@ -343,10 +343,10 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
 
     # Tracking reward scale
     lin_vel_reward_scale = 2.0
-    yaw_rate_reward_scale = 1.5        # raise: discourage the "turn to avoid descent" evasion
-    z_vel_reward_scale = -0.5          # lower: allow the vertical motion needed to descend stairs/slopes
-    ang_vel_reward_scale = -0.1        # lower: allow pitch/roll motion while descending
-    orientation_reward_scale = -1.5    # lower: don't over-penalize pitch mismatch at step edges
+    yaw_rate_reward_scale = 1.5        # raised (kept): discourage the "turn to avoid descent" evasion
+    z_vel_reward_scale = -2.0          # reverted to original
+    ang_vel_reward_scale = -0.25       # reverted to original
+    orientation_reward_scale = -5.0    # reverted to original
     height_reward_scale = 1.0
     
 
@@ -354,9 +354,9 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     joints_torque_reward_scale = -2.5e-6 
     joints_accel_reward_scale = -2.5e-7
     joints_energy_reward_scale = -1e-4
-    joints_hip_position_reward_scale = -0.1  # enabled: counter hip adduction (feet inward)
-    joints_thigh_position_reward_scale = -0.1 * 0.0  # disabled
-    joints_calf_position_reward_scale = -0.001 * 0.0  # disabled
+    joints_hip_position_reward_scale = -0.1 * 0.0  # disabled (reverted)
+    joints_thigh_position_reward_scale = -0.1 * 0.0
+    joints_calf_position_reward_scale = -0.001 * 0.0
    
     
     # Undesired contacts reward scale
