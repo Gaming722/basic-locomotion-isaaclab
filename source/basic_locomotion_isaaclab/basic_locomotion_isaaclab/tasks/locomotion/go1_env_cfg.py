@@ -345,7 +345,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     lin_vel_reward_scale = 2.0
     yaw_rate_reward_scale = 1.5        # raised (kept): discourage the "turn to avoid descent" evasion
     z_vel_reward_scale = -2.0          # reverted to original
-    ang_vel_reward_scale = -0.25       # reverted to original
+    ang_vel_reward_scale = -0.25 * 0.25      # reverted to original
     orientation_reward_scale = -5.0    # reverted to original
     height_reward_scale = 1.0
     
@@ -378,7 +378,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     feet_air_time_variance_reward_scale = -1.0*0.0
 
     feet_height_clearance_aperiodic_reward_scale = 0.25*0.0  
-    feet_height_clearance_periodic_reward_scale = 0.25  # aligned with Aliengo
+    feet_height_clearance_periodic_reward_scale = 0.25 * 2.0 # aligned with Aliengo
     
     feet_height_clearance_mujoco_aperiodic_reward_scale = 0.25*0.0
     feet_height_clearance_mujoco_periodic_reward_scale = 0.25*0.0  # aligned with Aliengo
@@ -399,7 +399,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
 
 
     # Contact suggestion reward scale
-    periodic_contact_suggestion_reward_scale = 0.25  # restored: keeps the periodic gait rhythm + swing clearance
+    periodic_contact_suggestion_reward_scale = 0.25 * 2.0 # restored: keeps the periodic gait rhythm + swing clearance
     # Desired step freq and duty factor (if periodic gait contact suggestion is used)
     desired_step_freq = 1.4
     desired_duty_factor = 0.65
