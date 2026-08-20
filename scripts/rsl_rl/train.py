@@ -129,7 +129,9 @@ def _upload_new_videos(video_dir: str, fps: int, seen: set[str]) -> None:
     video_dir = Path(video_dir)
     if not video_dir.exists():
         return
-    for video_path in sorted(video_dir.glob("rl-video-episode-*.mp4")):
+    # RecordVideo names files "rl-video-step-<step>.mp4" when a step_trigger is used and
+    # "rl-video-episode-<n>.mp4" for an episode trigger -- match both.
+    for video_path in sorted(video_dir.glob("rl-video-*.mp4")):
         if video_path.name in seen:
             continue
         try:
