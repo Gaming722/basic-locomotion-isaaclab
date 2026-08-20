@@ -20,6 +20,13 @@ parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_interval", type=int, default=2000, help="Interval between video recordings (in steps).")
+parser.add_argument(
+    "--log_videos_wandb",
+    action="store_true",
+    default=False,
+    help="Upload the recorded videos to W&B as 'train_video' media (requires --video and a "
+         "wandb logger; a daemon thread polls the video folder and uploads each new video).",
+)
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
@@ -78,6 +85,7 @@ if version.parse(installed_version) < version.parse(RSL_RL_VERSION):
 import gymnasium as gym
 import logging
 import os
+import threading
 import time
 import torch
 from datetime import datetime
@@ -111,6 +119,37 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
+
+
+def _upload_new_videos(video_dir: str, fps: int, seen: set[str]) -> None:
+    """Upload every mp4 in ``video_dir`` whose name is not yet in ``seen``."""
+    import wandb
+    from pathlib import Path
+
+    video_dir = Path(video_dir)
+    if not video_dir.exists():
+        return
+    for video_path in sorted(video_dir.glob("rl-video-episode-*.mp4")):
+        if video_path.name in seen:
+            continue
+        try:
+            wandb.log({"train_video": wandb.Video(str(video_path), format="mp4", fps=fps)})
+            seen.add(video_path.name)
+            print(f"[INFO] Uploaded {video_path.name} to W&B.")
+        except Exception as e:  # noqa: BLE001 - keep going on transient errors
+            print(f"[WARN] Failed to upload {video_path.name} to W&B: {e}")
+
+
+def _upload_videos_to_wandb(video_dir: str, fps: int, seen: set[str], poll_interval: float = 10.0):
+    """Daemon thread: poll the video folder and upload each new mp4 to W&B.
+
+    Runs in the background for the whole ``runner.learn()`` call, which is synchronous
+    in the main thread. ``seen`` is shared with the caller so a final flush after
+    ``learn()`` does not re-upload.
+    """
+    while True:
+        _upload_new_videos(video_dir, fps, seen)
+        time.sleep(poll_interval)
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -214,8 +253,33 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
 
+    # background-upload the periodically recorded videos to W&B. Must be started after the
+    # runner is created (its logger initialized wandb). Only rank 0 uploads.
+    video_upload_enabled = (
+        args_cli.video
+        and args_cli.log_videos_wandb
+        and agent_cfg.logger == "wandb"
+        and (not args_cli.distributed or app_launcher.local_rank == 0)
+    )
+    video_upload_seen: set[str] = set()
+    video_upload_dir = os.path.join(log_dir, "videos", "train")
+    video_upload_fps = 50
+    if video_upload_enabled:
+        # one frame per env step at the control frequency
+        video_upload_fps = max(1, int(round(1.0 / (env_cfg.sim.dt * getattr(env_cfg, "decimation", 1)))))
+        threading.Thread(
+            target=_upload_videos_to_wandb,
+            args=(video_upload_dir, video_upload_fps, video_upload_seen),
+            daemon=True,
+        ).start()
+        print(f"[INFO] Streaming recorded videos to W&B as 'train_video' (fps={video_upload_fps}).")
+
     # run training
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+
+    # final flush so a video recorded at the very last steps is not lost with the daemon.
+    if video_upload_enabled:
+        _upload_new_videos(video_upload_dir, video_upload_fps, video_upload_seen)
 
     print(f"Training time: {round(time.time() - start_time, 2)} seconds")
 
