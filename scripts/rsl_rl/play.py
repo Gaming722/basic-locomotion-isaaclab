@@ -55,6 +55,14 @@ parser.add_argument(
     help="Fixed velocity command 'vx vy wz' for all envs (overrides the env's random command "
          "generator, e.g. --cmd \"0.5 0 0\" for constant forward).",
 )
+parser.add_argument(
+    "--visualize_edge_map",
+    action="store_true",
+    default=False,
+    help="Visualize the feet_edge reward edge map in the viewport (black = edge cells, "
+         "white = feasible/flat cells). Only applies to envs that set use_vision=True "
+         "(rough-vision tasks with an edge_height_scanner).",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -165,6 +173,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             env_cfg.difficulty = args_cli.difficulty
         env_cfg.rebuild_terrain()
         print(f"[INFO] Play terrain: {env_cfg.terrain_type} difficulty={env_cfg.difficulty}")
+
+    # visualize the feet_edge reward edge map (black = edge, white = feasible) if requested
+    if args_cli.visualize_edge_map:
+        if hasattr(env_cfg, "visualize_edge_map"):
+            env_cfg.visualize_edge_map = True
+            print("[INFO] Visualizing feet_edge reward edge map (black=edges, white=feasible).")
+        else:
+            print("[WARN] --visualize_edge_map ignored: env cfg has no visualize_edge_map field.")
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
