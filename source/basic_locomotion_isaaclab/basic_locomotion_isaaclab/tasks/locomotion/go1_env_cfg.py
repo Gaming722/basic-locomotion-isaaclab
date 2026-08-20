@@ -345,7 +345,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     lin_vel_reward_scale = 2.0
     yaw_rate_reward_scale = 1.5        # raised (kept): discourage the "turn to avoid descent" evasion
     z_vel_reward_scale = -2.0          # reverted to original
-    ang_vel_reward_scale = -0.25 * 0.25      # reverted to original
+    ang_vel_reward_scale = -0.25 * 0.5      # softened to half of the original -0.25
     orientation_reward_scale = -5.0    # reverted to original
     height_reward_scale = 1.0
     
@@ -354,9 +354,9 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     joints_torque_reward_scale = -2.5e-6 
     joints_accel_reward_scale = -2.5e-7
     joints_energy_reward_scale = -1e-4
-    joints_hip_position_reward_scale = -0.1 * 0.0  # disabled (reverted)
-    joints_thigh_position_reward_scale = -0.1 * 0.0
-    joints_calf_position_reward_scale = -0.001 * 0.0
+    joints_hip_position_reward_scale = -0.1 * 1.0  # enabled: penalize hip deviation (adduction)
+    joints_thigh_position_reward_scale = -0.1 * 1.0
+    joints_calf_position_reward_scale = -0.001 * 1.0
    
     
     # Undesired contacts reward scale
@@ -448,7 +448,7 @@ class Go1RoughVisionEnvCfg(Go1RoughBlindEnvCfg):
         height_map_y_points = int(round(pattern_cfg.size[1] / pattern_cfg.resolution)) + 1
         self.observation_space = self.observation_space + height_map_x_points * height_map_y_points
 
-        self.feet_edge_reward_scale = -1.0
+        self.feet_edge_reward_scale = -1.0 * 2.0
 
     # Play-time terrain override (mirrors Go1RoughVisionTiledEnvCfg): select a single
     # terrain type / difficulty, e.g. `--terrain stairs --difficulty 0.467` plays on 12 cm

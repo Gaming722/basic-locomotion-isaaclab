@@ -60,8 +60,8 @@ class RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     policy = RslRlPpoActorCriticCfg(
         class_name="ActorCritic", #ActorCritic, ActorCriticRecurrent, ActorCriticSymm, ActorCriticMoE
         init_noise_std=1.0,
-        actor_hidden_dims=[128, 128, 128],
-        critic_hidden_dims=[128, 128, 128],
+        actor_hidden_dims=[512, 256, 128],
+        critic_hidden_dims=[512, 256, 128],
         activation="elu",
     )
     algorithm = RslRlPpoAlgorithmCfg(
@@ -69,11 +69,11 @@ class RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.005,
+        entropy_coef=0.001,
         num_learning_epochs=5,
         num_mini_batches=4,
-        learning_rate=1.0e-3,
-        schedule="adaptive",
+        learning_rate=3.0e-4,
+        schedule="fixed",
         gamma=0.99,
         lam=0.95,
         desired_kl=0.01,
