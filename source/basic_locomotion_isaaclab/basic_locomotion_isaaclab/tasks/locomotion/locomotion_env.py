@@ -134,52 +134,9 @@ class LocomotionEnv(DirectRLEnv):
                     self.cfg.observation_noise_model, num_envs=self.num_envs, device=self.device
                 )
 
-        # Logging
-        self._episode_sums = {
-            key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
-            for key in [
-                "track_height_exp",
-                "track_lin_vel_xy_exp",
-                "track_lin_vel_z_l2",
-                "track_orientation_l2",
-                "track_ang_vel_xy_l2",
-                "track_ang_vel_z_exp",
-
-                "undesired_contacts",
-                "action_rate_l2",
-                "action_smoothness_l2",
-                
-                "joints_hip_pos_l2",
-                "joints_thigh_pos_l2",
-                "joints_calf_pos_l2",
-                "joints_acc_l2",
-                "joints_torques_l2",
-                "joints_energy_l1",
-                
-                "feet_air_time",
-                "feet_air_time_variance",
-
-                "feet_height_clearance_periodic",
-                "feet_height_clearance_aperiodic",
-                "feet_height_clearance_mujoco_periodic",
-                "feet_height_clearance_mujoco_aperiodic",
-                "feet_slide",
-                "feet_to_hip_distance_l2",
-                "feet_edge",
-                "feet_vertical_surface_contacts",
-
-                "periodic_contact_suggestion",
-                "stance_contact_suggestion",
-
-                "dof_pos_limits",
-                "pose",
-                "termination",
-                "mj_feet_clearance",
-                "mj_feet_height",
-                "mj_feet_slip",
-                "mj_feet_air_time",
-            ]
-        }
+        # Logging: per-term episode reward sums, keyed lazily by active (non-zero-scale)
+        # rewards in _get_rewards so disabled terms are never logged.
+        self._episode_sums = {}
         # Per-environment velocity-tracking error used by the terrain curriculum.
         # Accumulating both the L1 error and command magnitude gives a stable
         # episode-level percentage even when individual commands are small.
@@ -494,51 +451,53 @@ class LocomotionEnv(DirectRLEnv):
         pose = custom_rewards.pose(self)
         termination = custom_rewards.termination(self)
 
-        rewards = {
-            "track_height_exp": track_height_exp * self.cfg.height_reward_scale * self.step_dt,
-            "track_lin_vel_xy_exp": track_lin_vel_xy_exp * self.cfg.lin_vel_reward_scale * self.step_dt,
-            "track_lin_vel_z_l2": track_lin_vel_z_l2 * self.cfg.z_vel_reward_scale * self.step_dt,
-            "track_orientation_l2": track_orientation_l2 * self.cfg.orientation_reward_scale * self.step_dt,
-            "track_ang_vel_xy_l2": track_ang_vel_xy_l2 * self.cfg.ang_vel_reward_scale * self.step_dt,
-            "track_ang_vel_z_exp": track_ang_vel_z_exp * self.cfg.yaw_rate_reward_scale * self.step_dt,
+        # Build the reward terms, dropping any with a zero scale so disabled rewards
+        # neither contribute to the total nor get logged.
+        reward_terms = [
+            ("track_height_exp", track_height_exp, self.cfg.height_reward_scale),
+            ("track_lin_vel_xy_exp", track_lin_vel_xy_exp, self.cfg.lin_vel_reward_scale),
+            ("track_lin_vel_z_l2", track_lin_vel_z_l2, self.cfg.z_vel_reward_scale),
+            ("track_orientation_l2", track_orientation_l2, self.cfg.orientation_reward_scale),
+            ("track_ang_vel_xy_l2", track_ang_vel_xy_l2, self.cfg.ang_vel_reward_scale),
+            ("track_ang_vel_z_exp", track_ang_vel_z_exp, self.cfg.yaw_rate_reward_scale),
 
-            "undesired_contacts": undesired_contacts * self.cfg.undersired_contact_reward_scale * self.step_dt,
-            "action_rate_l2": action_rate_l2 * self.cfg.action_rate_reward_scale * self.step_dt,
-            "action_smoothness_l2": action_smoothness_l2 * self.cfg.action_smoothness_reward_scale * self.step_dt,
+            ("undesired_contacts", undesired_contacts, self.cfg.undersired_contact_reward_scale),
+            ("action_rate_l2", action_rate_l2, self.cfg.action_rate_reward_scale),
+            ("action_smoothness_l2", action_smoothness_l2, self.cfg.action_smoothness_reward_scale),
 
-            "joints_hip_pos_l2": joints_hip_pos_l2 * self.cfg.joints_hip_position_reward_scale * self.step_dt,
-            "joints_thigh_pos_l2": joints_thigh_pos_l2 * self.cfg.joints_thigh_position_reward_scale * self.step_dt,
-            "joints_calf_pos_l2": joints_calf_pos_l2 * self.cfg.joints_calf_position_reward_scale * self.step_dt,
-            "joints_acc_l2": joints_acc_l2 * self.cfg.joints_accel_reward_scale * self.step_dt,
-            "joints_torques_l2": joints_torques_l2 * self.cfg.joints_torque_reward_scale * self.step_dt,
-            "joints_energy_l1": joints_energy_l1 * self.cfg.joints_energy_reward_scale * self.step_dt,
+            ("joints_hip_pos_l2", joints_hip_pos_l2, self.cfg.joints_hip_position_reward_scale),
+            ("joints_thigh_pos_l2", joints_thigh_pos_l2, self.cfg.joints_thigh_position_reward_scale),
+            ("joints_calf_pos_l2", joints_calf_pos_l2, self.cfg.joints_calf_position_reward_scale),
+            ("joints_acc_l2", joints_acc_l2, self.cfg.joints_accel_reward_scale),
+            ("joints_torques_l2", joints_torques_l2, self.cfg.joints_torque_reward_scale),
+            ("joints_energy_l1", joints_energy_l1, self.cfg.joints_energy_reward_scale),
 
-            "feet_air_time": feet_air_time * self.cfg.feet_air_time_reward_scale * self.step_dt,
-            "feet_air_time_variance": feet_air_time_variance * self.cfg.feet_air_time_variance_reward_scale * self.step_dt,
-            
-            "feet_height_clearance_aperiodic": feet_height_clearance_aperiodic * self.cfg.feet_height_clearance_aperiodic_reward_scale * self.step_dt,
-            "feet_height_clearance_periodic": feet_height_clearance_periodic * self.cfg.feet_height_clearance_periodic_reward_scale * self.step_dt,
-            "feet_height_clearance_mujoco_aperiodic": feet_height_clearance_mujoco_aperiodic * self.cfg.feet_height_clearance_mujoco_aperiodic_reward_scale * self.step_dt,
-            "feet_height_clearance_mujoco_periodic": feet_height_clearance_mujoco_periodic * self.cfg.feet_height_clearance_mujoco_periodic_reward_scale * self.step_dt,
-            
-            "feet_slide": feet_slide * self.cfg.feet_slide_reward_scale * self.step_dt,
-            "feet_to_hip_distance_l2": feet_to_hip_distance_l2 * self.cfg.feet_to_hip_distance_reward_scale * self.step_dt,
-            "feet_edge": feet_edge * self.cfg.feet_edge_reward_scale * self.step_dt,
-            "feet_vertical_surface_contacts": feet_vertical_surface_contacts * self.cfg.feet_vertical_surface_contacts_reward_scale * self.step_dt,
+            ("feet_air_time", feet_air_time, self.cfg.feet_air_time_reward_scale),
+            ("feet_air_time_variance", feet_air_time_variance, self.cfg.feet_air_time_variance_reward_scale),
 
-            "periodic_contact_suggestion": periodic_contact_suggestion * self.cfg.periodic_contact_suggestion_reward_scale * self.step_dt,
-            "stance_contact_suggestion": stance_contact_suggestion * self.cfg.stance_contact_suggestion_reward_scale * self.step_dt,
+            ("feet_height_clearance_aperiodic", feet_height_clearance_aperiodic, self.cfg.feet_height_clearance_aperiodic_reward_scale),
+            ("feet_height_clearance_periodic", feet_height_clearance_periodic, self.cfg.feet_height_clearance_periodic_reward_scale),
+            ("feet_height_clearance_mujoco_aperiodic", feet_height_clearance_mujoco_aperiodic, self.cfg.feet_height_clearance_mujoco_aperiodic_reward_scale),
+            ("feet_height_clearance_mujoco_periodic", feet_height_clearance_mujoco_periodic, self.cfg.feet_height_clearance_mujoco_periodic_reward_scale),
 
-            "dof_pos_limits": dof_pos_limits * getattr(self.cfg, "dof_pos_limits_reward_scale", 0.0) * self.step_dt,
-            "pose": pose * getattr(self.cfg, "pose_reward_scale", 0.0) * self.step_dt,
-            "termination": termination * getattr(self.cfg, "termination_reward_scale", 0.0) * self.step_dt,
+            ("feet_slide", feet_slide, self.cfg.feet_slide_reward_scale),
+            ("feet_to_hip_distance_l2", feet_to_hip_distance_l2, self.cfg.feet_to_hip_distance_reward_scale),
+            ("feet_edge", feet_edge, self.cfg.feet_edge_reward_scale),
+            ("feet_vertical_surface_contacts", feet_vertical_surface_contacts, self.cfg.feet_vertical_surface_contacts_reward_scale),
 
-            "mj_feet_clearance": mj_feet_clearance * getattr(self.cfg, "mj_feet_clearance_reward_scale", 0.0) * self.step_dt,
-            "mj_feet_height": mj_feet_height * getattr(self.cfg, "mj_feet_height_reward_scale", 0.0) * self.step_dt,
-            "mj_feet_slip": mj_feet_slip * getattr(self.cfg, "mj_feet_slip_reward_scale", 0.0) * self.step_dt,
-            "mj_feet_air_time": mj_feet_air_time * getattr(self.cfg, "mj_feet_air_time_reward_scale", 0.0) * self.step_dt,
+            ("periodic_contact_suggestion", periodic_contact_suggestion, self.cfg.periodic_contact_suggestion_reward_scale),
+            ("stance_contact_suggestion", stance_contact_suggestion, self.cfg.stance_contact_suggestion_reward_scale),
 
-        }
+            ("dof_pos_limits", dof_pos_limits, getattr(self.cfg, "dof_pos_limits_reward_scale", 0.0)),
+            ("pose", pose, getattr(self.cfg, "pose_reward_scale", 0.0)),
+            ("termination", termination, getattr(self.cfg, "termination_reward_scale", 0.0)),
+
+            ("mj_feet_clearance", mj_feet_clearance, getattr(self.cfg, "mj_feet_clearance_reward_scale", 0.0)),
+            ("mj_feet_height", mj_feet_height, getattr(self.cfg, "mj_feet_height_reward_scale", 0.0)),
+            ("mj_feet_slip", mj_feet_slip, getattr(self.cfg, "mj_feet_slip_reward_scale", 0.0)),
+            ("mj_feet_air_time", mj_feet_air_time, getattr(self.cfg, "mj_feet_air_time_reward_scale", 0.0)),
+        ]
+        rewards = {key: value * scale * self.step_dt for key, value, scale in reward_terms if scale != 0.0}
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
 
         # Check for NaNs and Infs
@@ -547,8 +506,10 @@ class LocomotionEnv(DirectRLEnv):
             breakpoint()  # For debugging purposes
             reward = torch.where(torch.isnan(reward) | torch.isinf(reward), torch.zeros_like(reward), reward)
         
-        # Logging
+        # Logging (lazily initialize the per-term accumulators so disabled rewards are never logged)
         for key, value in rewards.items():
+            if key not in self._episode_sums:
+                self._episode_sums[key] = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             self._episode_sums[key] += value
         lin_vel_command_l1 = torch.sum(torch.abs(self._commands[:, :2]), dim=1)
         tracks_linear_command = lin_vel_command_l1 > 0.01
