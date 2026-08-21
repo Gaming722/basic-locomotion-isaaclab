@@ -85,7 +85,6 @@ if version.parse(installed_version) < version.parse(RSL_RL_VERSION):
 import gymnasium as gym
 import logging
 import os
-import threading
 import time
 import torch
 from datetime import datetime
@@ -121,37 +120,30 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
-def _upload_new_videos(video_dir: str, fps: int, seen: set[str]) -> None:
-    """Upload every mp4 in ``video_dir`` whose name is not yet in ``seen``."""
-    import wandb
-    from pathlib import Path
+class WandbRecordVideo(gym.wrappers.RecordVideo):
+    """RecordVideo that uploads each finished video to W&B right after it is saved.
 
-    video_dir = Path(video_dir)
-    if not video_dir.exists():
-        return
-    # RecordVideo names files "rl-video-step-<step>.mp4" when a step_trigger is used and
-    # "rl-video-episode-<n>.mp4" for an episode trigger -- match both.
-    for video_path in sorted(video_dir.glob("rl-video-*.mp4")):
-        if video_path.name in seen:
-            continue
-        try:
-            wandb.log({"train_video": wandb.Video(str(video_path), format="mp4", fps=fps)})
-            seen.add(video_path.name)
-            print(f"[INFO] Uploaded {video_path.name} to W&B.")
-        except Exception as e:  # noqa: BLE001 - keep going on transient errors
-            print(f"[WARN] Failed to upload {video_path.name} to W&B: {e}")
-
-
-def _upload_videos_to_wandb(video_dir: str, fps: int, seen: set[str], poll_interval: float = 10.0):
-    """Daemon thread: poll the video folder and upload each new mp4 to W&B.
-
-    Runs in the background for the whole ``runner.learn()`` call, which is synchronous
-    in the main thread. ``seen`` is shared with the caller so a final flush after
-    ``learn()`` does not re-upload.
+    Uploading must happen in the main thread from ``stop_recording()`` AFTER the parent
+    has finalized the mp4 -- a background poller can pick the file up mid-write (moviepy
+    writes it incrementally over a few seconds) and upload a truncated, un-previewable
+    mp4 (e.g. a 48-byte file with only the ftyp box).
     """
-    while True:
-        _upload_new_videos(video_dir, fps, seen)
-        time.sleep(poll_interval)
+
+    def __init__(self, env, log_videos_wandb: bool, **kwargs):
+        super().__init__(env, **kwargs)
+        self._log_videos_wandb = log_videos_wandb
+
+    def stop_recording(self):
+        pending_path = (
+            os.path.join(self.video_folder, f"{self._video_name}.mp4")
+            if self._video_name and len(self.recorded_frames) > 0
+            else None
+        )
+        super().stop_recording()  # writes + finalizes the mp4 (complete once this returns)
+        if self._log_videos_wandb and pending_path and os.path.exists(pending_path):
+            import wandb
+
+            wandb.log({"train_video": wandb.Video(pending_path, fps=self.frames_per_sec, format="mp4")})
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -229,7 +221,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         }
         print("[INFO] Recording videos during training.")
         print_dict(video_kwargs, nesting=4)
-        env = gym.wrappers.RecordVideo(env, **video_kwargs)
+        # upload each finished video to W&B right after it is saved (main thread, complete file)
+        use_wandb_video = (
+            args_cli.log_videos_wandb
+            and getattr(agent_cfg, "logger", None) == "wandb"
+            and (not args_cli.distributed or app_launcher.local_rank == 0)
+        )
+        if use_wandb_video:
+            print("[INFO] Uploading recorded videos to W&B as 'train_video'.")
+            env = WandbRecordVideo(env, log_videos_wandb=True, **video_kwargs)
+        else:
+            env = gym.wrappers.RecordVideo(env, **video_kwargs)
 
     start_time = time.time()
 
@@ -255,33 +257,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
 
-    # background-upload the periodically recorded videos to W&B. Must be started after the
-    # runner is created (its logger initialized wandb). Only rank 0 uploads.
-    video_upload_enabled = (
-        args_cli.video
-        and args_cli.log_videos_wandb
-        and agent_cfg.logger == "wandb"
-        and (not args_cli.distributed or app_launcher.local_rank == 0)
-    )
-    video_upload_seen: set[str] = set()
-    video_upload_dir = os.path.join(log_dir, "videos", "train")
-    video_upload_fps = 50
-    if video_upload_enabled:
-        # one frame per env step at the control frequency
-        video_upload_fps = max(1, int(round(1.0 / (env_cfg.sim.dt * getattr(env_cfg, "decimation", 1)))))
-        threading.Thread(
-            target=_upload_videos_to_wandb,
-            args=(video_upload_dir, video_upload_fps, video_upload_seen),
-            daemon=True,
-        ).start()
-        print(f"[INFO] Streaming recorded videos to W&B as 'train_video' (fps={video_upload_fps}).")
-
     # run training
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
-
-    # final flush so a video recorded at the very last steps is not lost with the daemon.
-    if video_upload_enabled:
-        _upload_new_videos(video_upload_dir, video_upload_fps, video_upload_seen)
 
     print(f"Training time: {round(time.time() - start_time, 2)} seconds")
 
