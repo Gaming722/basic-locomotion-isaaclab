@@ -355,9 +355,9 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     joints_torque_reward_scale = -2.5e-6 
     joints_accel_reward_scale = -2.5e-7
     joints_energy_reward_scale = -1e-4
-    joints_hip_position_reward_scale = -0.1 * 1.0  # enabled: penalize hip deviation (adduction)
-    joints_thigh_position_reward_scale = -0.1 * 1.0
-    joints_calf_position_reward_scale = -0.001 * 1.0
+    joints_hip_position_reward_scale = 0.0  # disabled: superseded by the mj pose reward
+    joints_thigh_position_reward_scale = 0.0  # disabled: superseded by the mj pose reward
+    joints_calf_position_reward_scale = 0.0  # disabled: superseded by the mj pose reward
    
     
     # Undesired contacts reward scale
@@ -410,6 +410,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
 
 
     # mujoco_playground GO1 joystick reference rewards (ported faithfully)
+    pose_reward_scale = 0.5
     dof_pos_limits_reward_scale = -1.0
     termination_reward_scale = -1.0
 

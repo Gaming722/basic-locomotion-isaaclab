@@ -172,6 +172,7 @@ class LocomotionEnv(DirectRLEnv):
                 "stance_contact_suggestion",
 
                 "dof_pos_limits",
+                "pose",
                 "termination",
                 "mj_feet_clearance",
                 "mj_feet_height",
@@ -490,6 +491,7 @@ class LocomotionEnv(DirectRLEnv):
         mj_feet_slip = custom_rewards.mj_feet_slip(self)
         mj_feet_air_time = custom_rewards.mj_feet_air_time(self)
         dof_pos_limits = custom_rewards.dof_pos_limits(self)
+        pose = custom_rewards.pose(self)
         termination = custom_rewards.termination(self)
 
         rewards = {
@@ -528,6 +530,7 @@ class LocomotionEnv(DirectRLEnv):
             "stance_contact_suggestion": stance_contact_suggestion * self.cfg.stance_contact_suggestion_reward_scale * self.step_dt,
 
             "dof_pos_limits": dof_pos_limits * getattr(self.cfg, "dof_pos_limits_reward_scale", 0.0) * self.step_dt,
+            "pose": pose * getattr(self.cfg, "pose_reward_scale", 0.0) * self.step_dt,
             "termination": termination * getattr(self.cfg, "termination_reward_scale", 0.0) * self.step_dt,
 
             "mj_feet_clearance": mj_feet_clearance * getattr(self.cfg, "mj_feet_clearance_reward_scale", 0.0) * self.step_dt,

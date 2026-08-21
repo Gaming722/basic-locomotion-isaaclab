@@ -588,6 +588,16 @@ def termination(self) -> torch.Tensor:
     return died.float()
 
 
+def pose(self) -> torch.Tensor:
+    # mujoco_playground GO1 _reward_pose: stay close to the default pose.
+    # Per-joint weight matches desired_joints_order ([hips, thighs, calves]):
+    # hip=1.0, thigh=1.0, calf=0.1.
+    weight = torch.tensor([1.0] * 8 + [0.1] * 4, device=self.device)
+    joint_pos = self._robot.data.joint_pos[:, self._ids_joints_order]
+    default_joint_pos = self._robot.data.default_joint_pos[:, self._ids_joints_order]
+    return torch.exp(-torch.sum(torch.square(joint_pos - default_joint_pos) * weight, dim=1))
+
+
 # -----------------------------------------------------------------------------
 # mujoco_playground GO1 joystick feet rewards (ported faithfully).
 # -----------------------------------------------------------------------------
