@@ -343,12 +343,12 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
 
     # Tracking reward scale
     tracking_sigma = 0.25             # exp tracking bandwidth, ported from mujoco_playground GO1 (reward_config.tracking_sigma)
-    lin_vel_reward_scale = 2.0
-    yaw_rate_reward_scale = 1.5        # raised (kept): discourage the "turn to avoid descent" evasion
-    z_vel_reward_scale = -2.0          # reverted to original
-    ang_vel_reward_scale = -0.25 * 0.5      # softened to half of the original -0.25
-    orientation_reward_scale = -5.0    # reverted to original
-    height_reward_scale = 1.0
+    lin_vel_reward_scale = 1.0        # = mj tracking_lin_vel
+    yaw_rate_reward_scale = 0.5       # = mj tracking_ang_vel
+    z_vel_reward_scale = -0.5         # = mj lin_vel_z
+    ang_vel_reward_scale = -0.05      # = mj ang_vel_xy
+    orientation_reward_scale = -3.0   # custom (mj orientation=-5.0, softened)
+    height_reward_scale = 0.5         # custom (mj has no base-height term)
     
 
     # Joint reward scale
