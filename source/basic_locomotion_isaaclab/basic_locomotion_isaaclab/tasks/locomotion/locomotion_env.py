@@ -73,6 +73,11 @@ class LocomotionEnv(DirectRLEnv):
         # Swing peak
         self._swing_peak = torch.tensor([0.0, 0.0, 0.0, 0.0], device=self.device).repeat(self.num_envs,1)
         self._swing_peak_periodic = torch.tensor([0.0, 0.0, 0.0, 0.0], device=self.device).repeat(self.num_envs,1)
+
+        # mujoco_playground-style foot-contact state for the mj feet rewards
+        self._mj_swing_peak = torch.zeros(self.num_envs, 4, device=self.device)
+        self._mj_feet_air_time = torch.zeros(self.num_envs, 4, device=self.device)
+        self._mj_last_contact = torch.zeros(self.num_envs, 4, dtype=torch.bool, device=self.device)
         
         # Desired Hip Offset
         self._desired_hip_offset = torch.tensor([-self.cfg.desired_hip_offset, self.cfg.desired_hip_offset, -self.cfg.desired_hip_offset, self.cfg.desired_hip_offset], device=self.device)
@@ -165,6 +170,13 @@ class LocomotionEnv(DirectRLEnv):
 
                 "periodic_contact_suggestion",
                 "stance_contact_suggestion",
+
+                "dof_pos_limits",
+                "termination",
+                "mj_feet_clearance",
+                "mj_feet_height",
+                "mj_feet_slip",
+                "mj_feet_air_time",
             ]
         }
         # Per-environment velocity-tracking error used by the terrain curriculum.
@@ -472,6 +484,14 @@ class LocomotionEnv(DirectRLEnv):
         feet_to_hip_distance_l2 = custom_rewards.feet_to_hip_distance_l2(self)
         feet_vertical_surface_contacts = custom_rewards.feet_vertical_surface_contacts(self)
 
+        custom_rewards._mj_feet_update_state(self)
+        mj_feet_clearance = custom_rewards.mj_feet_clearance(self)
+        mj_feet_height = custom_rewards.mj_feet_height(self)
+        mj_feet_slip = custom_rewards.mj_feet_slip(self)
+        mj_feet_air_time = custom_rewards.mj_feet_air_time(self)
+        dof_pos_limits = custom_rewards.dof_pos_limits(self)
+        termination = custom_rewards.termination(self)
+
         rewards = {
             "track_height_exp": track_height_exp * self.cfg.height_reward_scale * self.step_dt,
             "track_lin_vel_xy_exp": track_lin_vel_xy_exp * self.cfg.lin_vel_reward_scale * self.step_dt,
@@ -506,7 +526,15 @@ class LocomotionEnv(DirectRLEnv):
 
             "periodic_contact_suggestion": periodic_contact_suggestion * self.cfg.periodic_contact_suggestion_reward_scale * self.step_dt,
             "stance_contact_suggestion": stance_contact_suggestion * self.cfg.stance_contact_suggestion_reward_scale * self.step_dt,
-            
+
+            "dof_pos_limits": dof_pos_limits * getattr(self.cfg, "dof_pos_limits_reward_scale", 0.0) * self.step_dt,
+            "termination": termination * getattr(self.cfg, "termination_reward_scale", 0.0) * self.step_dt,
+
+            "mj_feet_clearance": mj_feet_clearance * getattr(self.cfg, "mj_feet_clearance_reward_scale", 0.0) * self.step_dt,
+            "mj_feet_height": mj_feet_height * getattr(self.cfg, "mj_feet_height_reward_scale", 0.0) * self.step_dt,
+            "mj_feet_slip": mj_feet_slip * getattr(self.cfg, "mj_feet_slip_reward_scale", 0.0) * self.step_dt,
+            "mj_feet_air_time": mj_feet_air_time * getattr(self.cfg, "mj_feet_air_time_reward_scale", 0.0) * self.step_dt,
+
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
 
@@ -526,6 +554,8 @@ class LocomotionEnv(DirectRLEnv):
         )
         self._lin_vel_l1_error_sum += lin_vel_l1_error * tracks_linear_command
         self._lin_vel_command_l1_sum += lin_vel_command_l1 * tracks_linear_command
+
+        custom_rewards._mj_feet_finalize_state(self)
         return reward
 
 
@@ -582,6 +612,11 @@ class LocomotionEnv(DirectRLEnv):
         # Reset swing peak
         self._swing_peak[env_ids] = torch.tensor([0.0, 0.0, 0.0, 0.0], device=self.device)
         self._swing_peak_periodic[env_ids] = torch.tensor([0.0, 0.0, 0.0, 0.0], device=self.device)
+
+        # Reset mujoco-style foot-contact state
+        self._mj_swing_peak[env_ids] = 0.0
+        self._mj_feet_air_time[env_ids] = 0.0
+        self._mj_last_contact[env_ids] = False
         
         # Reset contact periodic
         self._phase_signal[env_ids] = self._phase_offset[env_ids].clone()# + self.step_dt * self._step_freq * torch.rand(env_ids.shape[0], 1, device=self.device)*10.

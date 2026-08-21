@@ -125,7 +125,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     episode_length_s = 20.0
     terrain_curriculum_move_up_error_percent = 20.0
     terrain_curriculum_move_down_error_percent = 50.0
-    decimation = 4
+    decimation = 5   # 5 physics substeps per control step (0.02 s / 0.004 s), matches mujoco_playground GO1
     action_scale = 0.5
     action_space = 12
     # DAgger student envs (Go1RoughVisionTiledEnvCfg) set this False: the real robot has
@@ -139,7 +139,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     observation_space += 12 # joint velocities
     observation_space += 12 # last actions
 
-    use_clock_signal = True
+    use_clock_signal = False   # no explicit clock signal in obs (mujoco_playground GO1 has none)
     if(use_clock_signal):
         observation_space += 4 # clock signal for periodic gait
 
@@ -262,7 +262,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / 200,
+        dt=1 / 250,   # 0.004 s physics dt (matches mujoco_playground GO1 sim_dt)
         render_interval=decimation,
         #disable_contact_processing=True,
         physics_material=sim_utils.RigidBodyMaterialCfg(
@@ -320,7 +320,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     # robot
     robot: ArticulationCfg = GO1_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Robot/.*", history_length=3, update_period=0.005, track_air_time=True
+        prim_path="/World/envs/env_.*/Robot/.*", history_length=3, update_period=0.004, track_air_time=True
     )
 
     desired_joints_order = ['FL_hip_joint', 'FR_hip_joint', 'RL_hip_joint', 'RR_hip_joint',
@@ -333,7 +333,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     
     # Desired tracking variables
     desired_base_height = 0.29
-    desired_feet_height = 0.08  # raised from 0.05 (Aliengo alignment): GO1's shorter legs need more swing clearance
+    desired_feet_height = 0.1  # = mujoco_playground GO1 max_foot_height; reused as the mj feet-reward reference height
 
 
     # Desired clip actions
@@ -342,6 +342,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
         
 
     # Tracking reward scale
+    tracking_sigma = 0.25             # exp tracking bandwidth, ported from mujoco_playground GO1 (reward_config.tracking_sigma)
     lin_vel_reward_scale = 2.0
     yaw_rate_reward_scale = 1.5        # raised (kept): discourage the "turn to avoid descent" evasion
     z_vel_reward_scale = -2.0          # reverted to original
@@ -378,7 +379,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     feet_air_time_variance_reward_scale = -1.0*0.0
 
     feet_height_clearance_aperiodic_reward_scale = 0.25*0.0  
-    feet_height_clearance_periodic_reward_scale = 0.25 * 2.0 # aligned with Aliengo
+    feet_height_clearance_periodic_reward_scale = 0.0  # disabled: superseded by the mj feet rewards (clearance/height)
     
     feet_height_clearance_mujoco_aperiodic_reward_scale = 0.25*0.0
     feet_height_clearance_mujoco_periodic_reward_scale = 0.25*0.0  # aligned with Aliengo
@@ -399,13 +400,23 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
 
 
     # Contact suggestion reward scale
-    periodic_contact_suggestion_reward_scale = 0.25 * 2.0 # restored: keeps the periodic gait rhythm + swing clearance
+    periodic_contact_suggestion_reward_scale = 0.0  # disabled: no explicit clock signal (mujoco_playground-style)
     # Desired step freq and duty factor (if periodic gait contact suggestion is used)
     desired_step_freq = 1.4
     desired_duty_factor = 0.65
     desired_phase_offset = [0.0, 0.5, 0.5, 0.0] #FL, FR, RL, RR
 
     stance_contact_suggestion_reward_scale = 0.25  # aligned with Aliengo
+
+
+    # mujoco_playground GO1 joystick reference rewards (ported faithfully)
+    dof_pos_limits_reward_scale = -1.0
+    termination_reward_scale = -1.0
+
+    mj_feet_clearance_reward_scale = -2.0
+    mj_feet_height_reward_scale = -0.2
+    mj_feet_slip_reward_scale = -0.1
+    mj_feet_air_time_reward_scale = 0.1
 
 
 

@@ -66,7 +66,7 @@ def track_height_exp(self) -> torch.Tensor:
 
 def track_lin_vel_xy_exp(self) -> torch.Tensor:
     lin_vel_error = torch.sum(torch.square(self._commands[:, :2] - self._robot.data.root_lin_vel_b[:, :2]), dim=1)
-    lin_vel_error_mapped = torch.exp(-lin_vel_error / 0.1)
+    lin_vel_error_mapped = torch.exp(-lin_vel_error / getattr(self.cfg, "tracking_sigma", 0.1))
     return lin_vel_error_mapped
 
 
@@ -118,7 +118,7 @@ def track_ang_vel_xy_l2(self) -> torch.Tensor:
 
 def track_ang_vel_z_exp(self) -> torch.Tensor:
     yaw_rate_error = torch.square(self._commands[:, 2] - self._robot.data.root_ang_vel_b[:, 2])
-    yaw_rate_error_mapped = torch.exp(-yaw_rate_error / 0.1)
+    yaw_rate_error_mapped = torch.exp(-yaw_rate_error / getattr(self.cfg, "tracking_sigma", 0.1))
     return yaw_rate_error_mapped
 
 
@@ -562,3 +562,92 @@ def stance_contact_suggestion(self) -> torch.Tensor:
     should_move = torch.norm(self._commands[:, :3], dim=1) > 0.01
     stance_contact_suggestion = torch.sum(contacts_foot, dim=1) * ~should_move / 4.0
     return stance_contact_suggestion
+
+
+def dof_pos_limits(self) -> torch.Tensor:
+    # Penalize joints that cross their soft limits (mujoco_playground GO1 _cost_joint_pos_limits).
+    joint_pos = self._robot.data.joint_pos[:, self._ids_joints_order]
+    soft_limits = self._robot.data.soft_joint_pos_limits[:, self._ids_joints_order]
+    out_of_limits = -torch.clip(joint_pos - soft_limits[..., 0], max=0.0)
+    out_of_limits += torch.clip(joint_pos - soft_limits[..., 1], min=0.0)
+    return torch.sum(out_of_limits, dim=1)
+
+
+def termination(self) -> torch.Tensor:
+    # Penalize the episode-ending "died" condition (base/hip ground contact), same as _get_dones.
+    net_contact_forces = self._contact_sensor.data.net_forces_w_history
+    died_check_base = torch.any(
+        torch.max(torch.norm(net_contact_forces[:, :, self._base_contact_sensor_id], dim=-1), dim=1)[0] > 1.0,
+        dim=1,
+    )
+    died_check_hips = torch.any(
+        torch.max(torch.norm(net_contact_forces[:, :, self._hip_contact_sensor_ids], dim=-1), dim=1)[0] > 1.0,
+        dim=1,
+    )
+    died = torch.logical_or(died_check_base, died_check_hips)
+    return died.float()
+
+
+# -----------------------------------------------------------------------------
+# mujoco_playground GO1 joystick feet rewards (ported faithfully).
+# -----------------------------------------------------------------------------
+
+def _mj_feet_update_state(self) -> None:
+    # Per-step foot-contact bookkeeping, run once before the mj feet rewards so they
+    # all read the same cached state. Mirrors mujoco_playground Joystick.step's
+    # pre-reward update: contact -> first_contact -> air_time += dt -> swing_peak.
+    contacts_foot = (
+        self._contact_sensor.data.net_forces_w_history[:, :, self._feet_contact_sensor_ids, :].norm(dim=-1).max(dim=1)[0]
+        > 1.0
+    )
+    contact_filt = contacts_foot | self._mj_last_contact
+    first_contact = (self._mj_feet_air_time > 0.0) & contact_filt
+
+    self._mj_feet_air_time = self._mj_feet_air_time + self.step_dt
+
+    feet_terrain_height = _get_feet_terrain_heights(self)
+    foot_z = self._robot.data.body_pos_w[:, self._feet_ids_robot, 2]
+    foot_height_rel = foot_z - feet_terrain_height
+    self._mj_swing_peak = torch.maximum(self._mj_swing_peak, foot_height_rel)
+
+    self._mj_contact = contacts_foot
+    self._mj_first_contact = first_contact
+
+
+def _mj_feet_finalize_state(self) -> None:
+    # Reset the foot-contact state after rewards (mujoco does the same after _get_reward).
+    self._mj_feet_air_time = self._mj_feet_air_time * (~self._mj_contact)
+    self._mj_last_contact = self._mj_contact.clone()
+    self._mj_swing_peak = self._mj_swing_peak * (~self._mj_contact)
+
+
+def mj_feet_clearance(self) -> torch.Tensor:
+    # mujoco_playground _cost_feet_clearance, with terrain-relative foot height.
+    feet_terrain_height = _get_feet_terrain_heights(self)
+    foot_z = self._robot.data.body_pos_w[:, self._feet_ids_robot, 2]
+    feet_vel = self._robot.data.body_lin_vel_w[:, self._feet_ids_robot, :2]
+    vel_norm = torch.sqrt(torch.linalg.norm(feet_vel, dim=-1))
+    delta = torch.abs(foot_z - feet_terrain_height - self.cfg.desired_feet_height)
+    return torch.sum(delta * vel_norm, dim=1)
+
+
+def mj_feet_height(self) -> torch.Tensor:
+    # mujoco_playground _cost_feet_height, with terrain-relative swing peak.
+    cmd_norm = torch.norm(self._commands, dim=1)
+    error = self._mj_swing_peak / self.cfg.desired_feet_height - 1.0
+    return torch.sum(torch.square(error) * self._mj_first_contact.float(), dim=1) * (cmd_norm > 0.01)
+
+
+def mj_feet_slip(self) -> torch.Tensor:
+    # mujoco_playground _cost_feet_slip.
+    cmd_norm = torch.norm(self._commands, dim=1)
+    feet_vel = self._robot.data.body_lin_vel_w[:, self._feet_ids_robot, :2]
+    vel_xy_norm_sq = torch.sum(torch.square(feet_vel), dim=-1)
+    return torch.sum(vel_xy_norm_sq * self._mj_contact.float(), dim=1) * (cmd_norm > 0.01)
+
+
+def mj_feet_air_time(self) -> torch.Tensor:
+    # mujoco_playground _reward_feet_air_time (0.1 s air-time threshold, hardcoded like mj).
+    cmd_norm = torch.norm(self._commands, dim=1)
+    rew_air_time = torch.sum((self._mj_feet_air_time - 0.1) * self._mj_first_contact.float(), dim=1)
+    return rew_air_time * (cmd_norm > 0.01)

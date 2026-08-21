@@ -36,13 +36,11 @@ from basic_locomotion_isaaclab.assets import ISAAC_ASSET_DIR
 GO1_ROOT = os.path.join(ISAAC_ASSET_DIR, "go1_asset")
 GO1_URDF = os.path.join(GO1_ROOT, "urdf", "go1.urdf")
 
-# Nominal PD gains (from legged_gym go1_config): no identified actuator model yet.
-GO1_STIFFNESS = 30.0  # N m / rad
-# Damping raised 0.6 -> 2.0 to match Aliengo's identified-motor damping level.
-# The low 0.6 value let GO1's joints flail easily and learn a degenerate fast
-# back-leg-only ("wheelbarrow") gait; higher damping makes that solution harder
-# and the joint response closer to Aliengo. Dynamics change -> requires a fresh run.
-GO1_DAMPING = 2.0  # N m s / rad
+# Nominal PD gains aligned to mujoco_playground GO1 (Kp=35.0, Kd=0.5).
+# Damping was previously raised 0.6 -> 2.0 (Aliengo-style) to suppress a degenerate
+# "wheelbarrow" gait; aligning to mj's soft 0.5 undoes that and requires a fresh run.
+GO1_STIFFNESS = 35.0  # N m / rad
+GO1_DAMPING = 0.5  # N m s / rad
 # Motor rotor inertia added to joint-space inertia (matches Aliengo's identified DCMotor).
 # Not yet identified for GO1; keeps joint response from being unrealistically light.
 GO1_ARMATURE = 0.01  # kg m^2
