@@ -343,8 +343,8 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
 
     # Tracking reward scale
     tracking_sigma = 0.25             # exp tracking bandwidth, ported from mujoco_playground GO1 (reward_config.tracking_sigma)
-    lin_vel_reward_scale = 1.0        # = mj tracking_lin_vel
-    yaw_rate_reward_scale = 0.5       # = mj tracking_ang_vel
+    lin_vel_reward_scale = 1.0 * 2.0       # = mj tracking_lin_vel
+    yaw_rate_reward_scale = 0.5 * 2.0      # = mj tracking_ang_vel
     z_vel_reward_scale = -0.5         # = mj lin_vel_z
     ang_vel_reward_scale = -0.05      # = mj ang_vel_xy
     orientation_reward_scale = -3.0   # custom (mj orientation=-5.0, softened)
@@ -386,7 +386,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     
     feet_slide_reward_scale = -0.25*0.0
     
-    feet_to_hip_distance_reward_scale = 1.5
+    feet_to_hip_distance_reward_scale = 1.5 * 0.5
     # This is used in loocmotion_env.py for the above reward
     desired_hip_offset = 0.08
 
@@ -417,7 +417,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     mj_feet_clearance_reward_scale = -2.0
     mj_feet_height_reward_scale = -0.2
     mj_feet_slip_reward_scale = -0.1
-    mj_feet_air_time_reward_scale = 0.1
+    mj_feet_air_time_reward_scale = 0.1 * 10.0
 
 
 
