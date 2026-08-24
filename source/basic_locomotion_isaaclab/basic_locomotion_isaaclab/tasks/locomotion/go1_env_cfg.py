@@ -123,7 +123,7 @@ class EventCfg:
 class Go1FlatEnvCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 20.0
-    terrain_curriculum_move_up_error_percent = 20.0
+    terrain_curriculum_move_up_error_percent = 25.0
     terrain_curriculum_move_down_error_percent = 50.0
     decimation = 5   # 5 physics substeps per control step (0.02 s / 0.004 s), matches mujoco_playground GO1
     action_scale = 0.5
@@ -342,7 +342,8 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
         
 
     # Tracking reward scale
-    tracking_sigma = 0.25             # exp tracking bandwidth, ported from mujoco_playground GO1 (reward_config.tracking_sigma)
+    tracking_sigma = 0.25             # exp tracking bandwidth, = mujoco_playground GO1 reward_config.tracking_sigma
+    command_a = [1.5, 0.8, 1.2]       # command amplitudes (lin_vel_x, lin_vel_y, yaw_rate), = mujoco_playground command_config.a
     lin_vel_reward_scale = 1.0 * 2.0       # = mj tracking_lin_vel
     yaw_rate_reward_scale = 0.5 * 2.0      # = mj tracking_ang_vel
     z_vel_reward_scale = -0.5         # = mj lin_vel_z
@@ -414,10 +415,10 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     dof_pos_limits_reward_scale = -1.0
     termination_reward_scale = -1.0
 
-    mj_feet_clearance_reward_scale = -2.0
+    mj_feet_clearance_reward_scale = -1.0
     mj_feet_height_reward_scale = -0.2
     mj_feet_slip_reward_scale = -0.1
-    mj_feet_air_time_reward_scale = 0.1 * 10.0
+    mj_feet_air_time_reward_scale = 0.2 * 10.0
 
 
 
