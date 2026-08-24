@@ -348,7 +348,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     yaw_rate_reward_scale = 0.5 * 2.0      # = mj tracking_ang_vel
     z_vel_reward_scale = -0.5         # = mj lin_vel_z
     ang_vel_reward_scale = -0.05      # = mj ang_vel_xy
-    orientation_reward_scale = -3.0   # custom (mj orientation=-5.0, softened)
+    orientation_reward_scale = -3.0 * 1.5  # custom (mj orientation=-5.0, softened)
     height_reward_scale = 0.5         # custom (mj has no base-height term)
     
 
@@ -415,10 +415,10 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     dof_pos_limits_reward_scale = -1.0
     termination_reward_scale = -1.0
 
-    mj_feet_clearance_reward_scale = -1.0
+    mj_feet_clearance_reward_scale = -1.0 * 0.3
     mj_feet_height_reward_scale = -0.2
     mj_feet_slip_reward_scale = -0.1
-    mj_feet_air_time_reward_scale = 0.2 * 10.0
+    mj_feet_air_time_reward_scale = 0.5 * 10.0
 
 
 
