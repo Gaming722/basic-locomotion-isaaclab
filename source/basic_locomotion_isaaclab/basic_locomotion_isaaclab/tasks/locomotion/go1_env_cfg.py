@@ -411,14 +411,14 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
 
 
     # mujoco_playground GO1 joystick reference rewards (ported faithfully)
-    pose_reward_scale = 0.5
+    pose_reward_scale = 0.5 * 2.0
     dof_pos_limits_reward_scale = -1.0
     termination_reward_scale = -1.0
 
-    mj_feet_clearance_reward_scale = -1.0 * 0.3
+    mj_feet_clearance_reward_scale = -1.0 * 0.05
     mj_feet_height_reward_scale = -0.2
     mj_feet_slip_reward_scale = -0.1
-    mj_feet_air_time_reward_scale = 0.5 * 10.0
+    mj_feet_air_time_reward_scale = 0.5 * 10.0 * 5.0
 
 
 
