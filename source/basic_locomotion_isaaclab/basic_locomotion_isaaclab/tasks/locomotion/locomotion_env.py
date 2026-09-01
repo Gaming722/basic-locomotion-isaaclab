@@ -42,6 +42,7 @@ from .go1_env_cfg import (
     Go1FlatEnvCfg,
     Go1RoughVisionEnvCfg,
     Go1RoughBlindEnvCfg,
+    Go1RoughMjEnvCfg,
     Go1RoughVisionTiledEnvCfg,
     Go1RoughVisionRayCasterEnvCfg,
 )
@@ -451,6 +452,14 @@ class LocomotionEnv(DirectRLEnv):
         pose = custom_rewards.pose(self)
         termination = custom_rewards.termination(self)
 
+        # mujoco_playground GO1 joystick base rewards (faithful forms for Go1RoughMjEnvCfg;
+        # scale 0 on every other env -> dropped from reward_terms, never logged).
+        mj_orientation = custom_rewards.mj_orientation(self)
+        mj_lin_vel_z = custom_rewards.mj_lin_vel_z(self)
+        mj_ang_vel_xy = custom_rewards.mj_ang_vel_xy(self)
+        mj_torques = custom_rewards.mj_torques(self)
+        stand_still = custom_rewards.stand_still(self)
+
         # Build the reward terms, dropping any with a zero scale so disabled rewards
         # neither contribute to the total nor get logged.
         reward_terms = [
@@ -496,6 +505,12 @@ class LocomotionEnv(DirectRLEnv):
             ("mj_feet_height", mj_feet_height, getattr(self.cfg, "mj_feet_height_reward_scale", 0.0)),
             ("mj_feet_slip", mj_feet_slip, getattr(self.cfg, "mj_feet_slip_reward_scale", 0.0)),
             ("mj_feet_air_time", mj_feet_air_time, getattr(self.cfg, "mj_feet_air_time_reward_scale", 0.0)),
+
+            ("mj_orientation", mj_orientation, getattr(self.cfg, "mj_orientation_reward_scale", 0.0)),
+            ("mj_lin_vel_z", mj_lin_vel_z, getattr(self.cfg, "mj_z_vel_reward_scale", 0.0)),
+            ("mj_ang_vel_xy", mj_ang_vel_xy, getattr(self.cfg, "mj_ang_vel_xy_reward_scale", 0.0)),
+            ("mj_torques", mj_torques, getattr(self.cfg, "mj_torques_reward_scale", 0.0)),
+            ("stand_still", stand_still, getattr(self.cfg, "stand_still_reward_scale", 0.0)),
         ]
         rewards = {key: value * scale * self.step_dt for key, value, scale in reward_terms if scale != 0.0}
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)

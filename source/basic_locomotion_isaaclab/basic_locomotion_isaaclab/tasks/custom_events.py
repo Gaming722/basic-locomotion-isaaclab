@@ -290,6 +290,12 @@ def _sample_random_commands(self, env_ids: torch.Tensor | None = None) -> torch.
 
 
 def _get_new_random_commands(self, env_ids: torch.Tensor | None = None):
+    # mujoco_playground-style command sampling (Go1RoughMjEnvCfg): ~5 s exponential
+    # resample + per-axis zeroing rule, replaces the episode-timeline logic below.
+    if getattr(self.cfg, "mj_command_sampling", False):
+        _mj_get_new_random_commands(self, env_ids)
+        return
+
     if env_ids is not None:
         self._commands[env_ids, :3] = _sample_random_commands(self, env_ids)
 
@@ -317,3 +323,41 @@ def _get_new_random_commands(self, env_ids: torch.Tensor | None = None):
     if self.num_envs > num_fixed_envs:
         fixed_env_ids = torch.arange(num_fixed_envs, device=self.device)
         self._commands[fixed_env_ids, :3] *= 0.0
+
+
+def _mj_get_new_random_commands(self, env_ids: torch.Tensor | None = None):
+    """Replicates mujoco_playground Joystick.reset + sample_command (joystick.py:609).
+
+    Each env resamples its command every Exp(1)*5 s (mj `steps_until_next_cmd`); on
+    resample, x <- x - w*(x - y*z) with y~U(-a,a), z~Bernoulli(b), w~Bernoulli(0.5).
+    """
+    if not hasattr(self, "_mj_cmd_timer"):
+        self._mj_cmd_timer = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+
+    # Reset: fresh command over the full range + a fresh resample timer (mj reset).
+    if env_ids is not None:
+        self._commands[env_ids, :3] = _sample_random_commands(self, env_ids)
+        self._mj_cmd_timer[env_ids] = _mj_exp_resample_steps(self, env_ids.shape[0])
+
+    # Every step: count down; resample where the timer expires.
+    self._mj_cmd_timer -= 1
+    resample_idx = torch.where(self._mj_cmd_timer <= 0)[0]
+    if resample_idx.numel() > 0:
+        n = resample_idx.numel()
+        y = _sample_random_commands(self, resample_idx)  # U(-a, a) per axis, mj reset scale
+        b = torch.tensor(
+            getattr(self.cfg, "command_b", [0.9, 0.25, 0.5]),
+            device=self.device, dtype=self._commands.dtype,
+        )
+        z = torch.bernoulli(b.expand(n, 3))
+        w = torch.bernoulli(torch.full((n, 3), 0.5, device=self.device))
+        x = self._commands[resample_idx, :3]
+        # mj sample_command: x_kp1 = x_k - w_k*(x_k - y_k*z_k).
+        self._commands[resample_idx, :3] = x - w * (x - y * z)
+        self._mj_cmd_timer[resample_idx] = _mj_exp_resample_steps(self, n)
+
+
+def _mj_exp_resample_steps(self, n: int) -> torch.Tensor:
+    # Exp(1) * 5 s -> control steps (round, like mj). Mean 5 s between resamples.
+    dt = self.step_dt
+    return torch.round(torch.empty(n, device=self.device).exponential_() * 5.0 / dt).to(torch.int32)

@@ -661,3 +661,39 @@ def mj_feet_air_time(self) -> torch.Tensor:
     cmd_norm = torch.norm(self._commands, dim=1)
     rew_air_time = torch.sum((self._mj_feet_air_time - 0.1) * self._mj_first_contact.float(), dim=1)
     return rew_air_time * (cmd_norm > 0.01)
+
+
+# -----------------------------------------------------------------------------
+# mujoco_playground GO1 joystick base rewards (ported faithfully for Go1RoughMjEnvCfg).
+# Scale 0.0 (the default on every other env) -> dropped from reward_terms, so these
+# are no-ops for existing envs.
+# -----------------------------------------------------------------------------
+
+def mj_orientation(self) -> torch.Tensor:
+    # mujoco_playground _cost_orientation: keep the base level (projected gravity ~ vertical).
+    projected_gravity = self._robot.data.projected_gravity_b
+    return torch.sum(torch.square(projected_gravity[:, :2]), dim=1)
+
+
+def mj_lin_vel_z(self) -> torch.Tensor:
+    # mujoco_playground _cost_lin_vel_z: penalize WORLD-frame z base linear velocity.
+    return torch.square(self._robot.data.root_lin_vel_w[:, 2])
+
+
+def mj_ang_vel_xy(self) -> torch.Tensor:
+    # mujoco_playground _cost_ang_vel_xy: penalize WORLD-frame xy base angular velocity.
+    return torch.sum(torch.square(self._robot.data.root_ang_vel_w[:, :2]), dim=1)
+
+
+def mj_torques(self) -> torch.Tensor:
+    # mujoco_playground _cost_torques.
+    torques = self._robot.data.applied_torque
+    return torch.sqrt(torch.sum(torch.square(torques), dim=1)) + torch.sum(torch.abs(torques), dim=1)
+
+
+def stand_still(self) -> torch.Tensor:
+    # mujoco_playground _cost_stand_still: penalize moving the joints when the command is ~zero.
+    cmd_norm = torch.norm(self._commands[:, :3], dim=1)
+    joint_pos = self._robot.data.joint_pos[:, self._ids_joints_order]
+    default_joint_pos = self._robot.data.default_joint_pos[:, self._ids_joints_order]
+    return torch.sum(torch.abs(joint_pos - default_joint_pos), dim=1) * (cmd_norm < 0.01)

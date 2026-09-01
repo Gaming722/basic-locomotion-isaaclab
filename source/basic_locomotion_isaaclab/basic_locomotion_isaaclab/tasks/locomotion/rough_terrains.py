@@ -103,3 +103,27 @@ GO1_ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
         ),
     },
 )
+
+# mujoco_playground GO1 rough-terrain teacher: fixed (curriculum=False) mild random-rough
+# field, mirroring the single 10x10 hfield (vertical relief ~0.05 m) of
+# scene_mjx_feetonly_rough_terrain.xml. No stairs/slopes/obstacles, no difficulty ramp.
+# Used by Go1RoughMjEnvCfg for the mj-aligned teacher.
+MJ_ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
+    curriculum=False,
+    size=(10.0, 10.0),
+    border_width=20.0,
+    num_rows=10,
+    num_cols=20,
+    horizontal_scale=0.1,
+    vertical_scale=0.005,
+    slope_threshold=0.75,
+    use_cache=False,
+    sub_terrains={
+        "flat": terrain_gen.MeshPlaneTerrainCfg(
+            proportion=0.2
+        ),
+        "random_rough": terrain_gen.HfRandomUniformTerrainCfg(
+            proportion=0.8, noise_range=(0.01, 0.05), noise_step=0.02, border_width=0.25
+        ),
+    },
+)

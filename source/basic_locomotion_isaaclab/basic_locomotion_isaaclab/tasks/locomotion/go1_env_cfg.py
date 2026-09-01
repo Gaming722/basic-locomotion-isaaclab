@@ -422,7 +422,7 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
 
 
 
-from .rough_terrains import COMMON_ROUGH_TERRAINS_CFG, GO1_ROUGH_TERRAINS_CFG
+from .rough_terrains import COMMON_ROUGH_TERRAINS_CFG, GO1_ROUGH_TERRAINS_CFG, MJ_ROUGH_TERRAINS_CFG
 @configclass
 class Go1RoughBlindEnvCfg(Go1FlatEnvCfg):
 
@@ -450,6 +450,27 @@ class Go1RoughBlindEnvCfg(Go1FlatEnvCfg):
         debug_vis=False,
     )
 
+
+@configclass
+class MjRoughEventCfg:
+    """GO1 mj teacher events: physics-material setup only.
+
+    mujoco_playground's go1 joystick trains with no perturbation (pert_config.enable
+    = False) and no domain randomization (randomize.py is never wired into joystick),
+    so the mj teacher drops the push / force-torque / mass / friction / gain events.
+    """
+
+    physics_material = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+            "static_friction_range": (0.2, 1.25),
+            "dynamic_friction_range": (0.2, 1.25),
+            "restitution_range": (0.0, 0.1),
+            "num_buckets": 64,
+        },
+    )
 
 
 @configclass
@@ -581,6 +602,90 @@ class Go1RoughVisionEnvCfg(Go1RoughBlindEnvCfg):
         ],
         max_distance=2.0,
     )
+
+
+@configclass
+class Go1RoughMjEnvCfg(Go1RoughVisionEnvCfg):
+    """mujoco_playground GO1 rough-terrain teacher, with the perceptive obs.
+
+    The policy obs keeps the base-centered heightmap scanner (``use_vision=True``
+    inherited from Go1RoughVisionEnvCfg), like the existing Go1-Rough-Vision teacher.
+    Only the *reward & training* setup mirrors mujoco_playground's go1 joystick:
+    reward_config.scales, mj command sampling, fixed rough terrain (no curriculum),
+    no perturbation / no DR, no action filter. Stays a noiseless Oracle teacher
+    (robustness is introduced on the student side during distillation).
+
+    Train with the existing RoughPPORunnerCfg (already aligned with mj rsl_rl_config).
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()  # Go1RoughVisionEnvCfg: adds the heightmap dims to observation_space
+        # Go1RoughVisionEnvCfg enables the feet-edge reward; mj has no such term.
+        self.feet_edge_reward_scale = 0.0
+
+    # ---- mj reward scales (joystick.py reward_config.scales) ----
+    lin_vel_reward_scale = 1.0            # mj tracking_lin_vel
+    yaw_rate_reward_scale = 0.5           # mj tracking_ang_vel
+    mj_z_vel_reward_scale = -0.5          # mj lin_vel_z (world-frame, faithful form)
+    mj_ang_vel_xy_reward_scale = -0.05    # mj ang_vel_xy (world-frame, faithful form)
+    mj_orientation_reward_scale = -5.0    # mj orientation (keep the base level)
+    pose_reward_scale = 0.5               # mj pose
+    dof_pos_limits_reward_scale = -1.0    # mj dof_pos_limits
+    termination_reward_scale = -1.0       # mj termination
+    action_rate_reward_scale = -0.01      # mj action_rate
+    mj_torques_reward_scale = -0.0002     # mj torques
+    joints_energy_reward_scale = -0.001   # mj energy (same form as joints_energy_l1)
+    stand_still_reward_scale = -1.0       # mj stand_still
+    mj_feet_clearance_reward_scale = -2.0  # mj feet_clearance
+    mj_feet_height_reward_scale = -0.2     # mj feet_height
+    mj_feet_slip_reward_scale = -0.1       # mj feet_slip
+    mj_feet_air_time_reward_scale = 0.1    # mj feet_air_time
+
+    # ---- disable non-mj reward terms (replaced by the faithful mj forms above) ----
+    z_vel_reward_scale = 0.0              # body-frame -> mj_z_vel_reward_scale
+    ang_vel_reward_scale = 0.0            # body-frame -> mj_ang_vel_xy_reward_scale
+    orientation_reward_scale = 0.0        # terrain-relative -> mj_orientation_reward_scale
+    height_reward_scale = 0.0             # mj has no base-height term
+    joints_torque_reward_scale = 0.0      # -> mj_torques_reward_scale
+    joints_accel_reward_scale = 0.0       # mj has no joint-acceleration term
+    action_smoothness_reward_scale = 0.0  # mj has no second-order action term
+    feet_to_hip_distance_reward_scale = 0.0
+    stance_contact_suggestion_reward_scale = 0.0
+    feet_vertical_surface_contacts_reward_scale = 0.0
+    # undersired_contact_reward_scale intentionally kept at -1.0: mujoco_playground is
+    # feet-only collision (no calf drag); Isaac Lab uses full collision, so this is the
+    # single non-mj term compensating for the physics difference.
+
+    # ---- mj command sampling (~5 s exponential resample + b zeroing rule) ----
+    mj_command_sampling = True
+    command_b = [0.9, 0.25, 0.5]  # mj command_config.b
+
+    # ---- mj action application: target = default + action*scale, no filter ----
+    use_filter_actions = False
+
+    # ---- fixed rough terrain (mj: single 10x10 hfield, no curriculum) ----
+    ROUGH_TERRAINS_CFG = MJ_ROUGH_TERRAINS_CFG
+    terrain = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="generator",
+        terrain_generator=ROUGH_TERRAINS_CFG,
+        max_init_terrain_level=0,
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+        ),
+        visual_material=sim_utils.MdlFileCfg(
+            mdl_path="{NVIDIA_NUCLEUS_DIR}/Materials/Base/Architecture/Shingles_01.mdl",
+            project_uvw=True,
+        ),
+        debug_vis=False,
+    )
+
+    # ---- no perturbation / no DR (mj joystick trains with neither) ----
+    events = MjRoughEventCfg()
 
 
 @configclass
