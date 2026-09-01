@@ -476,6 +476,13 @@ class MjRoughEventCfg:
 @configclass
 class Go1RoughVisionEnvCfg(Go1RoughBlindEnvCfg):
 
+    # Clip the per-step total reward to [0, 10000], mirroring mujoco_playground
+    # joystick.py `reward = jp.clip(sum(...) * dt, 0.0, 10000.0)`. The 0 lower bound
+    # caps the large negative spikes on fall steps -> lower return variance -> stable
+    # PPO (this was the missing piece behind the mj-env late-stage collapse). Only envs
+    # that set this field (vision + mj teacher) clip; blind/flat envs are unchanged.
+    reward_clip: tuple = (0.0, 10000.0)
+
     def __post_init__(self) -> None:
         pattern_cfg = self.perceptive_height_scanner.pattern_cfg
         height_map_x_points = int(round(pattern_cfg.size[0] / pattern_cfg.resolution)) + 1

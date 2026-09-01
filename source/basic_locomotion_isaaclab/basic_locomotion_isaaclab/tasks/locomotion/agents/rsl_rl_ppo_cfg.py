@@ -69,14 +69,14 @@ class RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.001,
-        num_learning_epochs=5,
-        num_mini_batches=4,
-        learning_rate=3.0e-4,
-        schedule="fixed",
-        gamma=0.99,
-        lam=0.95,
-        desired_kl=0.01,
+        entropy_coef=0.01,     # = mujoco_playground brax_ppo_config entropy_cost (stability)
+        num_learning_epochs=4, # = brax num_updates_per_batch
+        num_mini_batches=32,   # = brax num_minibatches (smaller minibatches, smoother updates)
+        learning_rate=3.0e-4,  # = brax learning_rate
+        schedule="adaptive",   # KL-adaptive LR (rsl_rl's closest equivalent to brax linear decay)
+        gamma=0.97,            # = brax discounting
+        lam=0.95,              # = brax gae_lambda
+        desired_kl=0.01,       # = brax desired_kl (adaptive-KL target)
         max_grad_norm=1.0,
     )
 

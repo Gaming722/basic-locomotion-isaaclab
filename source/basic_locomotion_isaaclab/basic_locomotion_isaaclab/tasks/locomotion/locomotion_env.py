@@ -515,6 +515,11 @@ class LocomotionEnv(DirectRLEnv):
         rewards = {key: value * scale * self.step_dt for key, value, scale in reward_terms if scale != 0.0}
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
 
+        # Per-step total reward clip to [0, 10000] (mujoco_playground joystick.py:278).
+        # Only envs with cfg.reward_clip set clip; all others are unchanged.
+        if getattr(self.cfg, "reward_clip", None) is not None:
+            reward = torch.clip(reward, min=self.cfg.reward_clip[0], max=self.cfg.reward_clip[1])
+
         # Check for NaNs and Infs
         if torch.isnan(reward).any() or torch.isinf(reward).any():
             print("NaN or Inf detected in reward computation. Setting reward to zero for affected environments.")
