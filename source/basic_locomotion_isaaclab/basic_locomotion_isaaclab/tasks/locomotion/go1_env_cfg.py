@@ -670,6 +670,9 @@ class Go1RoughMjEnvCfg(Go1RoughVisionEnvCfg):
     # ---- mj action application: target = default + action*scale, no filter ----
     use_filter_actions = False
 
+    # ---- mj termination: die only when the base flips past 90 deg (not on hip contact) ----
+    mj_termination = True
+
     # ---- fixed rough terrain (mj: single 10x10 hfield, no curriculum) ----
     ROUGH_TERRAINS_CFG = MJ_ROUGH_TERRAINS_CFG
     terrain = TerrainImporterCfg(

@@ -574,7 +574,11 @@ def dof_pos_limits(self) -> torch.Tensor:
 
 
 def termination(self) -> torch.Tensor:
-    # Penalize the episode-ending "died" condition (base/hip ground contact), same as _get_dones.
+    # Penalize the episode-ending "died" condition, consistent with env._get_dones.
+    # mj_termination (mj-faithful envs): die only when the base flips past 90 deg.
+    if getattr(self.cfg, "mj_termination", False):
+        return (self._robot.data.projected_gravity_b[:, 2] > 0.0).float()
+    # Default: base/hip ground contact.
     net_contact_forces = self._contact_sensor.data.net_forces_w_history
     died_check_base = torch.any(
         torch.max(torch.norm(net_contact_forces[:, :, self._base_contact_sensor_id], dim=-1), dim=1)[0] > 1.0,

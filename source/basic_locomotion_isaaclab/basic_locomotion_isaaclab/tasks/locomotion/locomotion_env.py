@@ -545,10 +545,17 @@ class LocomotionEnv(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        net_contact_forces = self._contact_sensor.data.net_forces_w_history
-        died_check_base = torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._base_contact_sensor_id], dim=-1), dim=1)[0] > 1.0, dim=1)
-        died_check_hips = torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._hip_contact_sensor_ids], dim=-1), dim=1)[0] > 1.0, dim=1) 
-        died = torch.logical_or(died_check_base, died_check_hips)
+        if getattr(self.cfg, "mj_termination", False):
+            # mujoco_playground go1 joystick termination: die only when the base is
+            # flipped past 90 deg (upvector z < 0 <=> projected gravity z > 0). Lets the
+            # robot wobble / recover instead of dying on the first hip/body contact, which
+            # is what keeps a mediocre policy alive (and the reward signal non-zero) in mj.
+            died = self._robot.data.projected_gravity_b[:, 2] > 0.0
+        else:
+            net_contact_forces = self._contact_sensor.data.net_forces_w_history
+            died_check_base = torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._base_contact_sensor_id], dim=-1), dim=1)[0] > 1.0, dim=1)
+            died_check_hips = torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._hip_contact_sensor_ids], dim=-1), dim=1)[0] > 1.0, dim=1)
+            died = torch.logical_or(died_check_base, died_check_hips)
         return died, time_out
 
 
