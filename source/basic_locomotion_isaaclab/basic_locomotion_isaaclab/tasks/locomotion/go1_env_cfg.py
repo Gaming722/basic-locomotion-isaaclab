@@ -22,7 +22,7 @@ from isaaclab.terrains.terrain_generator_cfg import TerrainGeneratorCfg
 from isaaclab.sensors import ImuCfg
 from isaaclab.utils import configclass
 
-from basic_locomotion_isaaclab.assets.go1_asset import GO1_CFG
+from basic_locomotion_isaaclab.assets.go1_asset import GO1_CFG, GO1_FEETONLY_CFG
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
 
 import basic_locomotion_isaaclab.tasks.custom_events as custom_events
@@ -659,9 +659,8 @@ class Go1RoughMjEnvCfg(Go1RoughVisionEnvCfg):
     feet_to_hip_distance_reward_scale = 0.0
     stance_contact_suggestion_reward_scale = 0.0
     feet_vertical_surface_contacts_reward_scale = 0.0
-    # undersired_contact_reward_scale intentionally kept at -1.0: mujoco_playground is
-    # feet-only collision (no calf drag); Isaac Lab uses full collision, so this is the
-    # single non-mj term compensating for the physics difference.
+    undersired_contact_reward_scale = 0.0  # feet-only collision below -> calf/body never
+    # contact terrain, so this full-collision compensation term is moot (mj has none).
 
     # ---- mj command sampling (~5 s exponential resample + b zeroing rule) ----
     mj_command_sampling = True
@@ -672,6 +671,11 @@ class Go1RoughMjEnvCfg(Go1RoughVisionEnvCfg):
 
     # ---- mj termination: die only when the base flips past 90 deg (not on hip contact) ----
     mj_termination = True
+
+    # ---- feet-only collision (mj go1_mjx_feetonly.xml): only the feet contact terrain.
+    # The calf/hip/body pass through instead of generating ground contact, so there is
+    # nothing to penalize with undesired_contact and flip-only termination is self-consistent.
+    robot: ArticulationCfg = GO1_FEETONLY_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     # ---- fixed rough terrain (mj: single 10x10 hfield, no curriculum) ----
     ROUGH_TERRAINS_CFG = MJ_ROUGH_TERRAINS_CFG

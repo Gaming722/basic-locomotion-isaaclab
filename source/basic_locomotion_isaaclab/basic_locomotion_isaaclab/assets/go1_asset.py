@@ -35,6 +35,10 @@ from basic_locomotion_isaaclab.assets import ISAAC_ASSET_DIR
 
 GO1_ROOT = os.path.join(ISAAC_ASSET_DIR, "go1_asset")
 GO1_URDF = os.path.join(GO1_ROOT, "urdf", "go1.urdf")
+# Feet-only URDF: only the four foot links keep collision geometry (mirrors mj's
+# go1_mjx_feetonly.xml), so the calf/hip/body never contact the terrain. The mj
+# teacher (Go1RoughMjEnvCfg) uses this; other GO1 envs keep full collision.
+GO1_FEETONLY_URDF = os.path.join(GO1_ROOT, "urdf", "go1_feetonly.urdf")
 
 # Nominal PD gains aligned to mujoco_playground GO1 (Kp=35.0, Kd=0.5).
 # Damping was previously raised 0.6 -> 2.0 (Aliengo-style) to suppress a degenerate
@@ -133,3 +137,6 @@ GO1_CFG = ArticulationCfg(
     actuators={"hip": GO1_HIP_ACTUATOR_CFG, "thigh": GO1_THIGH_ACTUATOR_CFG, "calf": GO1_CALF_ACTUATOR_CFG},
     soft_joint_pos_limit_factor=0.95,
 )
+
+# Feet-only variant used by the mj teacher: same as GO1_CFG but loads go1_feetonly.urdf.
+GO1_FEETONLY_CFG = GO1_CFG.replace(spawn=GO1_CFG.spawn.replace(asset_path=GO1_FEETONLY_URDF))
