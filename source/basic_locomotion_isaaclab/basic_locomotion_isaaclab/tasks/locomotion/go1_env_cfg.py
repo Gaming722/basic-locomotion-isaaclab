@@ -482,6 +482,9 @@ class Go1RoughVisionEnvCfg(Go1RoughBlindEnvCfg):
     # PPO (this was the missing piece behind the mj-env late-stage collapse). Only envs
     # that set this field (vision + mj teacher) clip; blind/flat envs are unchanged.
     reward_clip: tuple = (0.0, 10000.0)
+    # air-time reward scaled down for the perceptive env (Go1FlatEnvCfg default 25.0 made
+    # the gait floaty in play; 15.0 keeps a lively step cycle without dominating).
+    mj_feet_air_time_reward_scale = 15.0
 
     def __post_init__(self) -> None:
         pattern_cfg = self.perceptive_height_scanner.pattern_cfg
@@ -489,7 +492,9 @@ class Go1RoughVisionEnvCfg(Go1RoughBlindEnvCfg):
         height_map_y_points = int(round(pattern_cfg.size[1] / pattern_cfg.resolution)) + 1
         self.observation_space = self.observation_space + height_map_x_points * height_map_y_points
 
-        self.feet_edge_reward_scale = -1.0 * 2.0
+        # feet-edge penalty strengthened (-2.0 was negligible next to the +air_time term:
+        # ~85:1 imbalance in play). -10.0 makes edge avoidance a real shaping term.
+        self.feet_edge_reward_scale = -10.0
 
     # Play-time terrain override (mirrors Go1RoughVisionTiledEnvCfg): select a single
     # terrain type / difficulty, e.g. `--terrain stairs --difficulty 0.467` plays on 12 cm
