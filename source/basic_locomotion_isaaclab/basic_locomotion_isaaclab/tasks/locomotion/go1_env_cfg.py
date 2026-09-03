@@ -482,9 +482,23 @@ class Go1RoughVisionEnvCfg(Go1RoughBlindEnvCfg):
     # PPO (this was the missing piece behind the mj-env late-stage collapse). Only envs
     # that set this field (vision + mj teacher) clip; blind/flat envs are unchanged.
     reward_clip: tuple = (0.0, 10000.0)
-    # air-time reward scaled down for the perceptive env (Go1FlatEnvCfg default 25.0 made
-    # the gait floaty in play; 15.0 keeps a lively step cycle without dominating).
-    mj_feet_air_time_reward_scale = 15.0
+
+    # ---- perceptive-env reward tuning (overrides Go1FlatEnvCfg; the mj env overrides
+    # these again to mj-faithful values, so it is unaffected) ----
+    # Air time 25 -> 10: mechanical leg lifts in play; keep a modest step-cycle incentive.
+    mj_feet_air_time_reward_scale = 10.0
+    # Vertical-velocity penalty up: suppress base bobbing while walking.
+    z_vel_reward_scale = -2.0
+    # Roll/pitch rate penalty down: it was the 2nd-largest negative term in the curves.
+    ang_vel_reward_scale = -0.03
+    # Foot clearance up (mj reference -2.0; scaled mid-way for this env).
+    mj_feet_clearance_reward_scale = -0.5
+    # Joint torque penalty up slightly (this term's magnitudes run small).
+    joints_torque_reward_scale = -1e-5
+    # Joint acceleration penalty down (it was the largest negative); shift the smoothing
+    # burden onto the action command instead.
+    joints_accel_reward_scale = -1e-7
+    action_smoothness_reward_scale = -0.005
 
     def __post_init__(self) -> None:
         pattern_cfg = self.perceptive_height_scanner.pattern_cfg
@@ -492,9 +506,8 @@ class Go1RoughVisionEnvCfg(Go1RoughBlindEnvCfg):
         height_map_y_points = int(round(pattern_cfg.size[1] / pattern_cfg.resolution)) + 1
         self.observation_space = self.observation_space + height_map_x_points * height_map_y_points
 
-        # feet-edge penalty strengthened (-2.0 was negligible next to the +air_time term:
-        # ~85:1 imbalance in play). -10.0 makes edge avoidance a real shaping term.
-        self.feet_edge_reward_scale = -10.0
+        # feet-edge penalty -10 -> -25 so the per-episode magnitude lands ~0.1 (play feedback).
+        self.feet_edge_reward_scale = -25.0
 
     # Play-time terrain override (mirrors Go1RoughVisionTiledEnvCfg): select a single
     # terrain type / difficulty, e.g. `--terrain stairs --difficulty 0.467` plays on 12 cm
