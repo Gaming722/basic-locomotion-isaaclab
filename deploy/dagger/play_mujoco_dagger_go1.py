@@ -57,8 +57,11 @@ GO1_DEFAULTS = dict(action_scale=0.5, clip_actions=3.0, use_filter=True,
 # MuJoCo camera geometry baked into the scene XML (training D435-equivalent).
 CAM_POS = (0.26, 0.0, 0.12)   # in trunk frame
 CAM_PITCH_DEG = 30.0
-CAM_FOVY = 58.0               # vertical FOV deg
-DEPTH_W, DEPTH_H = 240, 140
+# Training renders at 106x60 (D435 848x480 / 8, aspect 1.7667) with HFOV 87 deg, so the
+# vertical FOV is 2*atan(tan(43.5 deg) * 60/106) ~ 56.5 deg. MuJoCo cameras specify fovy
+# (vertical), which reproduces the same projection at 106x60.
+CAM_FOVY = 56.5              # vertical FOV deg
+DEPTH_W, DEPTH_H = 106, 60
 
 # Training dynamics parameters to align (go1_asset.py DelayedPDActuatorCfg).
 TRAIN_DT = 0.005              # IsaacLab sim.dt

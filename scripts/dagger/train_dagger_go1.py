@@ -68,9 +68,10 @@ parser.add_argument(
 parser.add_argument(
     "--depth_blur_sigma",
     type=float,
-    default=1.0,
-    help="Gaussian blur sigma (px) applied to the student depth to simulate optics / "
-         "848->240 downscale smoothing. 0 disables.",
+    default=0.5,
+    help="Gaussian blur sigma (px) applied to the student depth at native 106x60 to "
+         "emulate the residual smoothing of the real D435 848->106 (8x area-average) "
+         "downscale / optics. 0 disables.",
 )
 parser.add_argument(
     "--depth_additive_noise_std",

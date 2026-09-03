@@ -96,8 +96,10 @@ below). If no `--checkpoint`/`--load_run` is given, the script auto-selects the
 By default the student depth is passed through a small D435-like sensor model (in
 `_sanitize_depth_data`, applied on GPU before the frame enters the history buffer):
 
-- `--depth_blur_sigma` (default `1.0` px): Gaussian blur to simulate optics / the
-  848→240 downscale smoothing. `0` disables.
+- `--depth_blur_sigma` (default `0.5` px): Gaussian blur to simulate the residual
+  smoothing of the real D435 848→106 (8× area-average) downscale / optics. The depth
+  is now rendered at native 106×60 (= 848×480 / 8, exact aspect), so there is **no**
+  in-sim 848→240 downscale to smooth any more. `0` disables.
 - `--depth_additive_noise_std` (default `0.0` m): additive Gaussian depth noise.
 - `--depth_dropout_prob` (default `0.0`): probability of dropping a pixel to the
   far-saturation code `2.0` (simulates D435 holes / invalid depth).
@@ -121,6 +123,13 @@ The camera config is **unchanged** (`clipping_range=(0.01, 3.0)`,
 | no-hit / far (> 3.0 m) | 3.0 | `2.0` (far-saturation) |
 | holes (`--depth_dropout_prob`) | — | `2.0` |
 | sub-`depth_min_z` (if enabled) | real depth | `2.0` |
+
+**Resolution contract:** both student cameras now render depth at **native 106×60** —
+exactly 1/8 of the D435 848×480 frame (aspect 1.7667), so at 87° HFOV the vertical FOV
+(~56.5°) and the per-pixel angular mapping match the real frame 1:1. The on-robot
+preprocessing must therefore downscale the real depth to 106×60 (e.g. an 8×
+area-average / `cv2.INTER_AREA`), not 240×140. Dagger checkpoints trained at the old
+240×140 are incompatible with a 106×60-trained student — retrain after this change.
 
 **Deploy-side contract (mandatory):** a real D435 emits `0` (16-bit raw) for any
 pixel it cannot measure (too close / too far / specular / hole). Feed the real
@@ -154,7 +163,9 @@ Videos land in `logs/rsl_rl/rough_direct/<run>/videos/dagger/dual_step-<N>.mp4`
 ### Raycast student (`Locomotion-Go1-Rough-Vision-RayCaster`)
 
 Alternative student that uses a Warp `MultiMeshRayCasterCamera` for depth instead of
-the rendered TiledCamera. Same D435 intrinsics (87° HFOV, 240×140) and same d435 mount
+the rendered TiledCamera. Same D435 intrinsics (87° HFOV, **106×60** = D435 848×480
+downsampled by exactly 8×, so the aspect — and therefore the vertical FOV, ~56.5° —
+matches the real frame) and same d435 mount
 pose as the Tiled student, so the two students see the same view. The depth ray-casts
 `/World/ground` + the robot's own links, so it sees its own legs (self-occlusion) but
 **never neighbouring envs** — no `enforce_env_spacing` needed, and the standard
@@ -186,5 +197,6 @@ Differences vs the Tiled student:
   pose (`track_mesh_transforms=True`); plain-string mesh targets would freeze them at
   the initial pose, so the links must use `RaycastTargetCfg`.
 - `--terrain` / `--difficulty` behave the same; `--num_envs` up to 4096.
-- **Watch step throughput** — 240×140 rays × `num_envs` (+ link meshes) is the
-  dominant cost; if the step rate is too low, reduce `--num_envs`.
+- **Watch step throughput** — 106×60 rays (≈6.4k/env) × `num_envs` (+ link meshes) is the
+  dominant cost; ~5× cheaper than the old 240×140. If the step rate is still too low,
+  reduce `--num_envs`.

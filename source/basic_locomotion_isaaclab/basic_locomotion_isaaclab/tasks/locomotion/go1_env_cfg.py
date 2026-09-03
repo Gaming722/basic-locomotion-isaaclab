@@ -840,8 +840,11 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
         ),
         depth_clipping_behavior="max",
         data_types=["distance_to_image_plane"],
-        height=140,
-        width=240,
+        # 106x60 = D435 depth frame 848x480 downsampled by exactly 8x: same aspect
+        # (1.7667) as the real frame, so at HFOV 87 deg the vertical FOV (~56.5 deg)
+        # and the per-pixel angular mapping match the real D435 projection 1:1.
+        height=60,
+        width=106,
         debug_vis=False,
     )
 
@@ -851,7 +854,7 @@ class Go1RoughVisionRayCasterEnvCfg(Go1RoughVisionEnvCfg):
     """GO1 DAgger student env: MultiMeshRayCasterCamera depth, no base_lin_vel, teacher_obs emitted.
 
     Reuses the original author's raycast depth camera (``Go1RoughVisionEnvCfg.depth_camera``)
-    but re-targets it to the real-D435 intrinsics (87 deg HFOV, 240x140) and the same d435
+    but re-targets it to the real-D435 intrinsics (87 deg HFOV, 106x60 = 848x480 / 8) and the same d435
     mount pose as the Tiled student, so the two students see the same view. The depth is a
     Warp ray-cast over ``/World/ground`` + the robot's own links (self-occlusion), which is
     cheaper than TiledCamera (no renderer) and inherently never sees neighbouring envs.
@@ -871,7 +874,7 @@ class Go1RoughVisionRayCasterEnvCfg(Go1RoughVisionEnvCfg):
     visualize_camera_mount = False
     depth_camera = MultiMeshRayCasterCameraCfg(
         # Mount on base with the same URDF d435_joint pose as the Tiled student so the two
-        # students see an identical view (87 deg / 240x140).
+        # students see an identical view (87 deg / 106x60 = D435 848x480 / 8, same aspect).
         prim_path="/World/envs/env_.*/Robot/base",
         update_period=1 / 60,
         offset=MultiMeshRayCasterCameraCfg.OffsetCfg(
@@ -905,8 +908,9 @@ class Go1RoughVisionRayCasterEnvCfg(Go1RoughVisionEnvCfg):
         pattern_cfg=patterns.PinholeCameraPatternCfg(
             focal_length=24.0,
             horizontal_aperture=45.55,  # D435 depth HFOV ~87 deg (matches Tiled student)
-            height=140,
-            width=240,
+            # 106x60 = D435 848x480 / 8 (same aspect -> same vFOV as the Tiled student).
+            height=60,
+            width=106,
         ),
         data_types=["distance_to_image_plane"],
         # no-hit / >3 m -> 3.0 -> pipeline clip -> 2.0 (far-saturation), same as Tiled far clip.

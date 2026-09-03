@@ -17,7 +17,7 @@ python deploy/dagger/play_mujoco_dagger_go1.py \
   --scene stairs --viewer
 ```
 
-- **Tiled / RayCaster 通用**：两个学生相机配置相同（87°×58°、240×140、位姿 (0.26,0,0.12)），脚本只读 checkpoint——换 `--ckpt` 即可。
+- **Tiled / RayCaster 通用**：两个学生相机配置相同（HFOV 87°、106×60 = D435 848×480/8、vFOV ~56.5°、位姿 (0.26,0,0.12)），脚本只读 checkpoint——换 `--ckpt` 即可。MuJoCo 相机 `fovy` 已按 106×60 设为 56.5°，渲染分辨率 `DEPTH_W/H` 同步为 106×60。
 - `--viewer` 需要显示；headless 用 EGL（`MUJOCO_GL=egl`，默认）。
 - 键盘：`Up/Down`=vx、`Left/Right`(+A/D)=vy、`Q/E`=wz（每次 ±0.1）、`V`=停止、`C`=巡航(0.4,0,0)、`ESC`=退出。
 - 默认录双窗视频到 `<ckpt目录>/videos/dagger_play/mj_sim2sim_go1.mp4`；`--no_video` 跳过。
