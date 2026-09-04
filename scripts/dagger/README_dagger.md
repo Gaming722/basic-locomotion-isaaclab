@@ -200,3 +200,39 @@ Differences vs the Tiled student:
 - **Watch step throughput** — 106×60 rays (≈6.4k/env) × `num_envs` (+ link meshes) is the
   dominant cost; ~5× cheaper than the old 240×140. If the step rate is still too low,
   reduce `--num_envs`.
+
+### Watch an already-trained student (`--eval`)
+
+Plays a saved `dagger_policy.pt` **without the DAgger machinery**: no teacher is loaded, no
+replay buffer is filled, no gradient updates run, and **no checkpoint is written** (neither
+periodically nor at the end). The step counter starts at `0` — it is never restored from the
+checkpoint (unlike `--resume_from`, which restores the training `step` and therefore makes a
+small `--max_training_steps` exit immediately). Depth sanitize / delay / history, camera follow
+and dual-pane recording are identical to training, so the video shows the true student
+input/output. Add `--cmd "vx vy wz"` to hold a constant velocity command (e.g. forward on
+stairs) and `--real-time` to pace interactive viewing to real time.
+
+```bash
+python scripts/dagger/train_dagger_go1.py \
+  --task=Locomotion-Go1-Rough-Vision-RayCaster \
+  --eval --eval_policy=logs/rsl_rl/rough_direct/<run>/dagger_policy_raycaster_106x60.pt \
+  --terrain stairs --difficulty 0.667 \
+  --cmd "0.5 0 0" --num_envs=1024 --headless \
+  --video --dual_pane --dual_pane_student_depth \
+  --video_length=600 --video_interval=1000000000 \
+  --video_output_dir=logs/rsl_rl/rough_direct/<run>/videos/eval_stairs_15cm \
+  --max_training_steps=620
+```
+
+- `--eval` requires `--eval_policy`; the teacher `--checkpoint` / `--load_run` is **not** needed.
+- `--max_training_steps` is the pure eval budget (counted from 0) and is **mandatory with
+  `--headless`** (otherwise the evaluation would run forever on a server — guarded at startup).
+  Without `--headless` and without a budget it runs until the window is closed.
+- Videos default to `<student_ckpt_dir>/videos/dagger_eval/dual_step-<N>.mp4` (separate from
+  training's `videos/dagger` so the two never overwrite `dual_step-0.mp4`).
+- `--follow_env` is auto-clamped onto a moving env: with `--num_envs > 500` and no `--cmd`,
+  envs 0-499 stand still, so it is forced to `>= 500`; with `--cmd` (or `--num_envs <= 500`)
+  every env moves and it may point anywhere.
+- A checkpoint trained at a different obs/action/depth shape is rejected with a clear error;
+  a metadata mismatch (`depth_image_size`, `depth_history_length`, `depth_delay_frames`) that
+  still loads warns about an input-distribution shift.

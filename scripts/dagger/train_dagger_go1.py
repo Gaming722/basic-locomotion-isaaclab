@@ -185,6 +185,26 @@ parser.add_argument(
     default=None,
     help="Path to a dagger_policy.pt checkpoint to resume training from (restores network, optimizer, step).",
 )
+parser.add_argument(
+    "--eval",
+    action="store_true",
+    default=False,
+    help="Evaluate a trained dagger_policy.pt student only: no teacher, no replay buffer, no gradient "
+         "updates, no checkpoint saves. The step counter starts at 0.",
+)
+parser.add_argument(
+    "--eval_policy",
+    type=str,
+    default=None,
+    help="Path to a trained dagger_policy.pt to evaluate. Required iff --eval.",
+)
+parser.add_argument(
+    "--cmd",
+    type=str,
+    default=None,
+    help="Fixed velocity command 'vx vy wz' for all envs (eval only; overrides the env's random command "
+         "generator, e.g. --cmd \"0.5 0 0\" for constant forward).",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -206,6 +226,7 @@ simulation_app = app_launcher.app
 
 import math
 import os
+import time
 from collections import deque
 
 import cv2
@@ -474,6 +495,219 @@ def _dual_pane_frame(env, env_index=600, depth_range=(0.2, 5.0), student_depth=F
     return np.hstack([sim_bgr, depth_resized])
 
 
+def _validate_eval_cli_args() -> str:
+    """Validate the --eval flags and return the absolute eval-policy path."""
+    if not args_cli.eval_policy:
+        raise SystemExit("--eval requires --eval_policy <path to dagger_policy.pt>")
+    eval_policy_path = os.path.abspath(args_cli.eval_policy)
+    if not os.path.exists(eval_policy_path):
+        raise FileNotFoundError(f"--eval_policy not found: {eval_policy_path}")
+    if args_cli.headless and args_cli.max_training_steps is None:
+        raise SystemExit(
+            "--eval with --headless needs --max_training_steps <N> "
+            "(otherwise the evaluation would run forever on a server)."
+        )
+    if args_cli.cmd:
+        try:
+            _ = [float(x) for x in args_cli.cmd.split()]
+        except ValueError:
+            raise SystemExit("--cmd must be 'vx vy wz' (three floats)")
+    return eval_policy_path
+
+
+def _check_student_ckpt_compat(ckpt: dict, net: torch.nn.Module, depth_image_hw: tuple) -> None:
+    """Hard-fail on student architecture mismatch; warn on metadata distribution shift."""
+    state_dict = ckpt.get("model_state_dict", {})
+    net_sd = net.state_dict()
+    if set(state_dict.keys()) != set(net_sd.keys()):
+        missing = sorted(set(net_sd.keys()) - set(state_dict.keys()))
+        extra = sorted(set(state_dict.keys()) - set(net_sd.keys()))
+        raise RuntimeError(
+            "student checkpoint architecture mismatch with the live env: "
+            f"missing={missing} extra={extra}. The checkpoint was trained for a different "
+            "obs/action/depth shape or network."
+        )
+    bad = [k for k in state_dict if tuple(state_dict[k].shape) != tuple(net_sd[k].shape)]
+    if bad:
+        raise RuntimeError(
+            "student checkpoint shape mismatch for: " + ", ".join(bad)
+            + ". Cannot load a policy trained at a different resolution/size."
+        )
+    meta = ckpt.get("metadata", {})
+    if "depth_image_size" in meta and tuple(meta["depth_image_size"]) != tuple(depth_image_hw):
+        print(
+            f"[WARN] --eval_policy metadata depth_image_size={meta['depth_image_size']} != live env "
+            f"{tuple(depth_image_hw)}; the depth input distribution may differ from training."
+        )
+    if "depth_history_length" in meta and meta["depth_history_length"] != args_cli.depth_history_length:
+        print(
+            f"[WARN] --eval_policy metadata depth_history_length={meta['depth_history_length']} != current "
+            f"--depth_history_length={args_cli.depth_history_length}."
+        )
+    if "depth_delay_frames" in meta and meta["depth_delay_frames"] != args_cli.depth_delay_frames:
+        print(
+            f"[WARN] --eval_policy metadata depth_delay_frames={meta['depth_delay_frames']} != current "
+            f"--depth_delay_frames={args_cli.depth_delay_frames}."
+        )
+
+
+def _install_fixed_command(env) -> None:
+    """Replace the env's random-command generator with a fixed velocity command (mirrors play.py)."""
+    try:
+        _vx, _vy, _wz = (float(x) for x in args_cli.cmd.split())
+    except ValueError:
+        raise SystemExit("--cmd must be 'vx vy wz' (three floats)")
+    if hasattr(env.unwrapped, "_commands"):
+        import basic_locomotion_isaaclab.tasks.custom_events as _ce
+
+        def _fixed_random_commands(env_obj, env_ids=None):
+            env_obj._commands[:, 0] = _vx
+            env_obj._commands[:, 1] = _vy
+            env_obj._commands[:, 2] = _wz
+
+        _ce._get_new_random_commands = _fixed_random_commands
+        print(f"[INFO] Fixed velocity command: {_vx:.2f} {_vy:.2f} {_wz:.2f} (all envs)")
+    else:
+        print("[WARN] --cmd ignored: env has no _commands buffer.")
+
+
+def _effective_follow_env(follow_env: int, num_envs: int, has_fixed_cmd: bool) -> int:
+    """Clamp --follow_env onto an env that is actually moving.
+
+    Envs 0-499 stand still (command zero) whenever num_envs > 500 and no fixed command is set, so
+    --follow_env must point at an env >= 500. With a fixed --cmd every env moves, and with
+    num_envs <= 500 all envs get random commands, so any valid index is fine there.
+    """
+    if num_envs <= 500 or has_fixed_cmd:
+        return max(0, min(follow_env, num_envs - 1))
+    return max(500, min(follow_env, num_envs - 1))
+
+
+def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
+    """Roll an already-trained DAgger student (no teacher / replay / gradients / checkpoint saves).
+
+    The step counter starts at 0 (never restored from the checkpoint). Reuses the exact training
+    depth pipeline, camera follow and dual-pane recording so the video shows the true student
+    input/output.
+    """
+    device = env.unwrapped.device
+    obs = env.get_observations()
+    current_depth_cpu = _sanitize_depth_data(env).detach().to(device="cpu", dtype=torch.float16)
+
+    num_envs = current_depth_cpu.shape[0]
+    common_obs_size = obs["common"].shape[-1]
+    single_action_space = getattr(env, "single_action_space", None)
+    if single_action_space is None:
+        single_action_space = getattr(env.unwrapped, "single_action_space", None)
+    action_size = (
+        gym.spaces.flatdim(single_action_space) if single_action_space is not None else env.action_space.shape[-1]
+    )
+    depth_channels = current_depth_cpu.shape[1]
+
+    # Patch BEFORE the first step so the very first observation already carries the fixed command.
+    if args_cli.cmd:
+        _install_fixed_command(env)
+    follow_env = _effective_follow_env(args_cli.follow_env, num_envs, has_fixed_cmd=args_cli.cmd is not None)
+
+    depth_history = current_depth_cpu.unsqueeze(0).repeat(args_cli.depth_history_length, 1, 1, 1, 1).contiguous()
+    history_index = args_cli.depth_history_length - 1
+
+    dagger_net = DaggerNet(
+        vec_size=common_obs_size,
+        output_size=action_size,
+        depth_channels=depth_channels,
+    ).to(device)
+    ckpt = torch.load(eval_policy_path, map_location=device, weights_only=False)
+    _check_student_ckpt_compat(ckpt, dagger_net, tuple(current_depth_cpu.shape[-2:]))
+    dagger_net.load_state_dict(ckpt["model_state_dict"])
+    dagger_net.eval()
+
+    robot = env.unwrapped._robot
+    eye_offset_b = torch.tensor([-args_cli.cam_distance, args_cli.cam_side, args_cli.cam_height], device=device)
+    tgt_offset_b = torch.tensor([0.6, 0.0, 0.3], device=device)
+
+    dual_writer = None
+    dual_frames_left = 0
+    max_steps = args_cli.max_training_steps
+    env_cfg = env.unwrapped.cfg
+    print(
+        "[INFO] Evaluating DAgger student "
+        f"(policy={eval_policy_path}, terrain={getattr(env_cfg, 'terrain_type', '?')}, "
+        f"difficulty={getattr(env_cfg, 'difficulty', None)}, num_envs={num_envs}, follow_env={follow_env}, "
+        f"depth_history={args_cli.depth_history_length}, depth_delay={args_cli.depth_delay_frames}, "
+        f"steps={'until the window closes' if max_steps is None else max_steps}, "
+        f"cmd={args_cli.cmd if args_cli.cmd else 'random'}, "
+        f"video={'dual-pane' if (args_cli.video and args_cli.dual_pane) else ('rgb' if args_cli.video else 'off')})."
+    )
+
+    step = 0
+    while simulation_app.is_running() and (max_steps is None or step < max_steps):
+        start_time = time.time()
+        common_obs = obs["common"]
+        newest_index = _delayed_newest_index(history_index, args_cli.depth_history_length)
+
+        # All envs are controlled by the student (env_indices_cpu=None) -- the same code path as
+        # the training loop's beta<=0 branch (training L715-724).
+        student_actions, _ = _predict_student_actions_chunked(
+            dagger_net=dagger_net,
+            depth_history=depth_history,
+            newest_index=newest_index,
+            common_obs=common_obs,
+            env_indices_cpu=None,
+            device=device,
+        )
+
+        obs, _, dones, _ = env.step(student_actions)
+        dones_cpu = dones.bool().to(device="cpu")
+        current_depth_cpu = _sanitize_depth_data(env).detach().to(device="cpu", dtype=torch.float16)
+
+        history_index = (history_index + 1) % args_cli.depth_history_length
+        depth_history[history_index].copy_(current_depth_cpu)
+        if dones_cpu.any():
+            depth_history[:, dones_cpu] = current_depth_cpu[dones_cpu].unsqueeze(0).expand(
+                args_cli.depth_history_length, -1, -1, -1, -1
+            )
+
+        # Camera follow -- mirrors training loop (keep in sync).
+        with torch.inference_mode():
+            root_pos = robot.data.root_state_w[follow_env, :3]
+            yaw_q = math_utils.yaw_quat(robot.data.root_quat_w[follow_env])
+            eye = root_pos + math_utils.quat_apply(yaw_q, eye_offset_b)
+            tgt = root_pos + math_utils.quat_apply(yaw_q, tgt_offset_b)
+        set_camera_view(eye.cpu().numpy(), tgt.cpu().numpy(), "/OmniverseKit_Persp")
+
+        # Dual-pane recording -- mirrors training loop (keep in sync). Non-dual-pane --video uses
+        # the RecordVideo wrapper applied in main(), so there is no double recording here.
+        if args_cli.video and args_cli.dual_pane:
+            if dual_frames_left == 0 and step % args_cli.video_interval == 0:
+                dual_frames_left = args_cli.video_length
+                dual_fname = os.path.join(video_out_dir, f"dual_step-{step}.mp4")
+                os.makedirs(os.path.dirname(dual_fname), exist_ok=True)
+            if dual_frames_left > 0:
+                frame = _dual_pane_frame(env, env_index=follow_env,
+                                        student_depth=args_cli.dual_pane_student_depth)
+                if dual_writer is None:
+                    dual_writer = cv2.VideoWriter(
+                        dual_fname, cv2.VideoWriter_fourcc(*"mp4v"), 50, (frame.shape[1], frame.shape[0])
+                    )
+                dual_writer.write(frame)
+                dual_frames_left -= 1
+                if dual_frames_left == 0:
+                    dual_writer.release()
+                    dual_writer = None
+                    print(f"[INFO] dual-pane video saved: {dual_fname}")
+
+        step += 1
+
+        if step % 100 == 0:
+            print(f"[INFO] eval step={step}/{max_steps if max_steps is not None else 'inf'}")
+
+        # Real-time pacing for interactive viewing (mirrors play.py).
+        sleep_time = env.unwrapped.step_dt - (time.time() - start_time)
+        if args_cli.real_time and sleep_time > 0:
+            time.sleep(sleep_time)
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Train a depth-conditioned student with online DAgger supervision."""
@@ -529,28 +763,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
-    print(f"[INFO] Loading experiment from directory: {log_root_path}")
-    if args_cli.use_pretrained_checkpoint:
-        resume_path = get_published_pretrained_checkpoint("rsl_rl", train_task_name)
-        if not resume_path:
-            print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
-            return
-    elif args_cli.checkpoint:
-        resume_path = retrieve_file_path(args_cli.checkpoint)
-    else:
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
-    log_dir = os.path.dirname(resume_path)
+    if args_cli.eval:
+        # eval: load the student policy directly -- no teacher run is involved.
+        eval_policy_path = _validate_eval_cli_args()
+        log_dir = os.path.dirname(eval_policy_path)
+    else:
+        print(f"[INFO] Loading experiment from directory: {log_root_path}")
+        if args_cli.use_pretrained_checkpoint:
+            resume_path = get_published_pretrained_checkpoint("rsl_rl", train_task_name)
+            if not resume_path:
+                print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
+                return
+        elif args_cli.checkpoint:
+            resume_path = retrieve_file_path(args_cli.checkpoint)
+        else:
+            resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+        log_dir = os.path.dirname(resume_path)
 
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
 
-    # where dagger videos are written (defaults to <teacher_run>/videos/dagger; override
-    # with --video_output_dir so concurrent runs don't clobber each other's recordings).
+    # where dagger videos are written (defaults to <teacher_run>/videos/dagger -- dagger_eval in
+    # eval mode so the two never clobber each other's dual_step-0.mp4; override with
+    # --video_output_dir so concurrent runs don't clobber each other's recordings).
     video_out_dir = (
         os.path.abspath(args_cli.video_output_dir)
         if args_cli.video_output_dir
-        else os.path.join(log_dir, "videos", "dagger")
+        else os.path.join(log_dir, "videos", "dagger_eval" if args_cli.eval else "dagger")
     )
 
     # create isaac environment
@@ -577,6 +817,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+
+    if args_cli.eval:
+        # Pure student rollout: no teacher, no replay, no gradient updates, no checkpoint saves.
+        # __main__ closes simulation_app after main() returns, so returning here is safe.
+        _run_student_eval(env, eval_policy_path=eval_policy_path, video_out_dir=video_out_dir)
+        env.close()
+        return
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     # load previously trained model
