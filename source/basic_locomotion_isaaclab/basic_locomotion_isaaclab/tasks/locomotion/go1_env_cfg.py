@@ -356,6 +356,8 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     joints_torque_reward_scale = -2.5e-6 
     joints_accel_reward_scale = -2.5e-7
     joints_energy_reward_scale = -1e-4
+    joint_vel_limits_soft_ratio = 0.8
+    joint_vel_limits_reward_scale = 0.0
     joints_hip_position_reward_scale = 0.0  # disabled: superseded by the mj pose reward
     joints_thigh_position_reward_scale = 0.0  # disabled: superseded by the mj pose reward
     joints_calf_position_reward_scale = 0.0  # disabled: superseded by the mj pose reward
@@ -498,6 +500,8 @@ class Go1RoughVisionEnvCfg(Go1RoughBlindEnvCfg):
     # Joint acceleration penalty down (it was the largest negative); shift the smoothing
     # burden onto the action command instead.
     joints_accel_reward_scale = -1e-7
+    # Penalize velocities above 80% of the actuator limits imported from the official URDF.
+    joint_vel_limits_reward_scale = -1.0
     action_smoothness_reward_scale = -0.005
 
     def __post_init__(self) -> None:
@@ -673,6 +677,7 @@ class Go1RoughMjEnvCfg(Go1RoughVisionEnvCfg):
     height_reward_scale = 0.0             # mj has no base-height term
     joints_torque_reward_scale = 0.0      # -> mj_torques_reward_scale
     joints_accel_reward_scale = 0.0       # mj has no joint-acceleration term
+    joint_vel_limits_reward_scale = 0.0   # mj has no joint-velocity-limit term
     action_smoothness_reward_scale = 0.0  # mj has no second-order action term
     feet_to_hip_distance_reward_scale = 0.0
     stance_contact_suggestion_reward_scale = 0.0

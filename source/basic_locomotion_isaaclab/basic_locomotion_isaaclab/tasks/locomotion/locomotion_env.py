@@ -428,6 +428,9 @@ class LocomotionEnv(DirectRLEnv):
         joints_acc_l2 = custom_rewards.joints_acc_l2(self)
         joints_torques_l2 = custom_rewards.joints_torques_l2(self)
         joints_energy_l1 = custom_rewards.joints_energy_l1(self)
+        joint_vel_limits = mdp.joint_vel_limits(
+            self, soft_ratio=getattr(self.cfg, "joint_vel_limits_soft_ratio", 1.0)
+        )
 
         feet_air_time = custom_rewards.feet_air_time(self)
         feet_air_time_variance = custom_rewards.feet_air_time_variance(self)
@@ -480,6 +483,7 @@ class LocomotionEnv(DirectRLEnv):
             ("joints_acc_l2", joints_acc_l2, self.cfg.joints_accel_reward_scale),
             ("joints_torques_l2", joints_torques_l2, self.cfg.joints_torque_reward_scale),
             ("joints_energy_l1", joints_energy_l1, self.cfg.joints_energy_reward_scale),
+            ("joint_vel_limits", joint_vel_limits, getattr(self.cfg, "joint_vel_limits_reward_scale", 0.0)),
 
             ("feet_air_time", feet_air_time, self.cfg.feet_air_time_reward_scale),
             ("feet_air_time_variance", feet_air_time_variance, self.cfg.feet_air_time_variance_reward_scale),
