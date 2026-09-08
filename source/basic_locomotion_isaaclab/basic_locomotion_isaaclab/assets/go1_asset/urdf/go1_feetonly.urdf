@@ -1,5 +1,5 @@
 <?xml version='1.0' encoding='utf-8'?>
-<robot name="go1_description">
+<robot name="go1">
   <material name="black">
     <color rgba="0.0 0.0 0.0 1.0" />
   </material>
@@ -27,12 +27,14 @@
   <material name="white">
     <color rgba="1.0 1.0 1.0 1.0" />
   </material>
+  <!-- ros_control plugin -->
   <gazebo>
     <plugin filename="libgazebo_ros_control.so" name="gazebo_ros_control">
       <robotNamespace>/go1_gazebo</robotNamespace>
       <robotSimType>gazebo_ros_control/DefaultRobotHWSim</robotSimType>
     </plugin>
   </gazebo>
+  <!-- Show the trajectory of trunk center. -->
   <gazebo>
     <plugin filename="libLinkPlot3DPlugin.so" name="3dplot">
       <frequency>10</frequency>
@@ -43,6 +45,17 @@
       </plot>
     </plugin>
   </gazebo>
+  <!-- Show the trajectory of foot. You can add another trajectory about another foot. -->
+  <!-- <gazebo>
+        <plugin name="3dplot" filename="libLinkPlot3DPlugin.so">
+            <frequency>100</frequency>
+            <plot>
+                <link>FL_foot</link>
+                <pose>0 0 0 0 0 0</pose>
+                <material>Gazebo/Green</material>
+            </plot>
+        </plugin>
+    </gazebo> -->
   <gazebo>
     <plugin filename="libgazebo_ros_force.so" name="gazebo_ros_force">
       <bodyName>trunk</bodyName>
@@ -68,6 +81,77 @@
       <pose>0 0 0 0 0 0</pose>
     </sensor>
   </gazebo>
+  <!-- Depth camera -->
+  <!-- <gazebo>
+        <plugin name="camera_plugin" filename="libgazebo_ros_openni_kinect.so">
+            <baseline>0.025</baseline>
+            <always_on>true</always_on>
+            <updateRate>0.0</updateRate>
+            <cameraName>unitree_camera_left</cameraName>
+            <frameName>depthCamera_link_left</frameName>
+            <imageTopicName>rgb/imageRaw_left</imageTopicName>
+            <depthImageTopicName>depth/imageRaw_left</depthImageTopicName>
+            <pointCloudTopicName>depth/points_left</pointCloudTopicName>
+            <cameraInfoTopicName>rgb/cameraInfo_left</cameraInfoTopicName>
+            <depthImageCameraInfoTopicName>depth/cameraInfo_left</depthImageCameraInfoTopicName>
+            <pointCloudCutoff>0.1</pointCloudCutoff>
+            <pointCloudCutoffMax>1.5</pointCloudCutoffMax>
+            <distortionK1>0.0</distortionK1>
+            <distortionK2>0.0</distortionK2>
+            <distortionK3>0.0</distortionK3>
+            <distortionT1>0.0</distortionT1>
+            <distortionT2>0.0</distortionT2>
+            <CxPrime>0.0</CxPrime>
+            <Cx>0.0045</Cx>
+            <Cy>0.0039</Cy>
+            <focalLength>0.004</focalLength>
+            <hackBaseline>0.0</hackBaseline>
+        </plugin>
+    </gazebo> -->
+  <!-- <gazebo reference="depthCamera_link_left">
+        <sensor name="unitree_camera_left" type="depth_camera">
+            <update_rate>16</update_rate>
+            <always_on>true</always_on>
+            <visualize>true</visualize>
+            <camera>
+                <horizontal_fov>2.094</horizontal_fov>
+                <image>
+                    <width>928</width>
+                    <height>800</height>
+                    <format>R8G8B8</format>
+                </image>
+                <depth_camera></depth_camera>
+                <clip>
+                    <near>0.1</near>
+                    <far>100</far>
+                </clip>
+            </camera>
+            <plugin name="camera_plugin" filename="libgazebo_ros_openni_kinect.so">
+                <baseline>0.025</baseline>
+                <always_on>true</always_on>
+                <updateRate>0.0</updateRate>
+                <cameraName>unitree_camera_left</cameraName>
+                <frameName>depthCamera_link_left</frameName>
+                <imageTopicName>rgb/imageRaw_left</imageTopicName>
+                <depthImageTopicName>depth/imageRaw_left</depthImageTopicName>
+                <pointCloudTopicName>depth/points_left</pointCloudTopicName>
+                <cameraInfoTopicName>rgb/cameraInfo_left</cameraInfoTopicName>
+                <depthImageCameraInfoTopicName>depth/cameraInfo_left</depthImageCameraInfoTopicName>
+                <pointCloudCutoff>0.1</pointCloudCutoff>
+                <pointCloudCutoffMax>1.5</pointCloudCutoffMax>
+                <distortionK1>0.0</distortionK1>
+                <distortionK2>0.0</distortionK2>
+                <distortionK3>0.0</distortionK3>
+                <distortionT1>0.0</distortionT1>
+                <distortionT2>0.0</distortionT2>
+                <CxPrime>0.0</CxPrime>
+                <Cx>0.0045</Cx>
+                <Cy>0.0039</Cy>
+                <focalLength>0.004</focalLength>
+                <hackBaseline>0.0</hackBaseline>
+            </plugin>
+        </sensor>
+    </gazebo> -->
   <gazebo reference="depthCamera_link_left">
     <sensor name="camera_link_camera" type="depth">
       <update_rate>20</update_rate>
@@ -109,6 +193,7 @@
       </plugin>
     </sensor>
   </gazebo>
+  <!-- Foot contacts. -->
   <gazebo reference="FR_calf">
     <sensor name="FR_foot_contact" type="contact">
       <update_rate>100</update_rate>
@@ -145,6 +230,7 @@
       </contact>
     </sensor>
   </gazebo>
+  <!-- Visualization of Foot contacts. -->
   <gazebo reference="FR_foot">
     <visual>
       <plugin filename="libunitreeDrawForcePlugin.so" name="drawForcePlugin">
@@ -193,6 +279,7 @@
     <mu2>0.2</mu2>
     <material>Gazebo/Red</material>
   </gazebo>
+  <!-- FL leg -->
   <gazebo reference="FL_hip">
     <mu1>0.2</mu1>
     <mu2>0.2</mu2>
@@ -219,6 +306,7 @@
     <kp value="1000000.0" />
     <kd value="1.0" />
   </gazebo>
+  <!-- FR leg -->
   <gazebo reference="FR_hip">
     <mu1>0.2</mu1>
     <mu2>0.2</mu2>
@@ -245,6 +333,7 @@
     <kp value="1000000.0" />
     <kd value="1.0" />
   </gazebo>
+  <!-- RL leg -->
   <gazebo reference="RL_hip">
     <mu1>0.2</mu1>
     <mu2>0.2</mu2>
@@ -271,6 +360,7 @@
     <kp value="1000000.0" />
     <kd value="1.0" />
   </gazebo>
+  <!-- RR leg -->
   <gazebo reference="RR_hip">
     <mu1>0.2</mu1>
     <mu2>0.2</mu2>
@@ -297,6 +387,19 @@
     <kp value="1000000.0" />
     <kd value="1.0" />
   </gazebo>
+  <!-- <xacro:include filename="$(find go1_gazebo)/launch/stairs.urdf.xacro"/> -->
+  <!-- <xacro:stairs stairs="15" xpos="0" ypos="0" zpos="0" /> -->
+  <!-- Rotor related joint and link is only for demonstrate location. -->
+  <!-- Actually, the rotor will rotate and the joint is not fixed. Reduction ratio should be considered. -->
+  <!-- Debug mode will hung up the robot, use "true" or "false" to switch it. -->
+  <!-- <xacro:if value="$(arg DEBUG)">
+        <link name="world"/>
+        <joint name="base_static_joint" type="fixed">
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <parent link="world"/>
+            <child link="base"/>
+        </joint>
+    </xacro:if>  -->
   <link name="base">
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -316,11 +419,12 @@
       <geometry>
         <mesh filename="../meshes/trunk.dae" scale="1 1 1" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <inertial>
-      <origin rpy="0 0 0" xyz="0.011611 0.004437 0.000108" />
-      <mass value="4.8" />
-      <inertia ixx="0.016130741919" ixy="0.000593180607" ixz="7.324662e-06" iyy="0.036507810812" iyz="2.0969537e-05" izz="0.044693872053" />
+      <origin rpy="0 0 0" xyz="0.0223 0.002 -0.0005" />
+      <mass value="5.204" />
+      <inertia ixx="0.0168128557" ixy="-0.0002296769" ixz="-0.0002945293" iyy="0.063009565" iyz="-4.18731e-05" izz="0.0716547275" />
     </inertial>
   </link>
   <joint name="imu_joint" type="fixed">
@@ -339,6 +443,7 @@
       <geometry>
         <box size="0.001 0.001 0.001" />
       </geometry>
+      <!-- <material name="red"/> -->
     </visual>
   </link>
   <joint name="FR_hip_joint" type="revolute">
@@ -346,8 +451,13 @@
     <parent link="trunk" />
     <child link="FR_hip" />
     <axis xyz="1 0 0" />
-    <dynamics damping="0" friction="0" />
-    <limit effort="33.5" lower="-0.8028514559173915" upper="0.8028514559173915" velocity="21" />
+    <dynamics damping="0.0" friction="0.0" />
+    <limit effort="23.7" lower="-0.863" upper="0.863" velocity="30.1" />
+  </joint>
+  <joint name="FR_hip_rotor_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0.11215 -0.04675 0" />
+    <parent link="trunk" />
+    <child link="FR_hip_rotor" />
   </joint>
   <link name="FR_hip">
     <visual>
@@ -355,28 +465,40 @@
       <geometry>
         <mesh filename="../meshes/hip.dae" scale="1 1 1" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <inertial>
-      <origin rpy="0 0 0" xyz="-0.00541 0.00074 6e-06" />
-      <mass value="0.510299" />
-      <inertia ixx="0.00030528937" ixy="7.788013e-06" ixz="2.2016e-07" iyy="0.000590894859" iyz="1.7175e-08" izz="0.000396594572" />
+      <origin rpy="0 0 0" xyz="-0.005657 0.008752 -0.000102" />
+      <mass value="0.591" />
+      <inertia ixx="0.000334008405" ixy="1.0826066e-05" ixz="1.290732e-06" iyy="0.000619101213" iyz="-1.643194e-06" izz="0.00040057614" />
     </inertial>
   </link>
-  <joint name="FR_hip_fixed" type="fixed">
-    <origin rpy="0 0 0" xyz="0 -0.08 0" />
-    <parent link="FR_hip" />
-    <child link="FR_thigh_shoulder" />
-  </joint>
-  <link name="FR_thigh_shoulder">
-    
+  <link name="FR_hip_rotor">
+    <visual>
+      <origin rpy="0 1.5707963267948966 0" xyz="0 0 0" />
+      <geometry>
+        <cylinder length="0.02" radius="0.035" />
+      </geometry>
+      <material name="green" />
+    </visual>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.0 0.0 0.0" />
+      <mass value="0.089" />
+      <inertia ixx="0.000111842" ixy="0.0" ixz="0.0" iyy="5.9647e-05" iyz="0.0" izz="5.9647e-05" />
+    </inertial>
   </link>
   <joint name="FR_thigh_joint" type="revolute">
     <origin rpy="0 0 0" xyz="0 -0.08 0" />
     <parent link="FR_hip" />
     <child link="FR_thigh" />
     <axis xyz="0 1 0" />
-    <dynamics damping="0" friction="0" />
-    <limit effort="33.5" lower="-1.0471975511965976" upper="4.1887902047863905" velocity="21" />
+    <dynamics damping="0.0" friction="0.0" />
+    <limit effort="23.7" lower="-0.686" upper="4.501" velocity="30.1" />
+  </joint>
+  <joint name="FR_thigh_rotor_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0.0 0.00015 0" />
+    <parent link="FR_hip" />
+    <child link="FR_thigh_rotor" />
   </joint>
   <link name="FR_thigh">
     <visual>
@@ -384,11 +506,26 @@
       <geometry>
         <mesh filename="../meshes/thigh_mirror.dae" scale="1 1 1" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <inertial>
-      <origin rpy="0 0 0" xyz="-0.003468 0.018947 -0.032736" />
-      <mass value="0.898919" />
-      <inertia ixx="0.005395867678" ixy="-1.02809e-07" ixz="0.000337529085" iyy="0.005142451046" iyz="5.816563e-06" izz="0.00102478732" />
+      <origin rpy="0 0 0" xyz="-0.003342 0.018054 -0.033451" />
+      <mass value="0.92" />
+      <inertia ixx="0.004431760472" ixy="-5.7496807e-05" ixz="-0.000218457134" iyy="0.004485671726" iyz="-0.000572001265" izz="0.000740309489" />
+    </inertial>
+  </link>
+  <link name="FR_thigh_rotor">
+    <visual>
+      <origin rpy="1.5707963267948966 0 0" xyz="0 0 0" />
+      <geometry>
+        <cylinder length="0.02" radius="0.035" />
+      </geometry>
+      <material name="green" />
+    </visual>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.0 0.0 0.0" />
+      <mass value="0.089" />
+      <inertia ixx="5.9647e-05" ixy="0.0" ixz="0.0" iyy="0.000111842" iyz="0.0" izz="5.9647e-05" />
     </inertial>
   </link>
   <joint name="FR_calf_joint" type="revolute">
@@ -396,8 +533,13 @@
     <parent link="FR_thigh" />
     <child link="FR_calf" />
     <axis xyz="0 1 0" />
-    <dynamics damping="0" friction="0" />
-    <limit effort="33.5" lower="-2.6965336943312392" upper="-0.9162978572970231" velocity="21" />
+    <dynamics damping="0.0" friction="0.0" />
+    <limit effort="35.55" lower="-2.818" upper="-0.888" velocity="20.06" />
+  </joint>
+  <joint name="FR_calf_rotor_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0.0 0.03235 0" />
+    <parent link="FR_thigh" />
+    <child link="FR_calf_rotor" />
   </joint>
   <link name="FR_calf">
     <visual>
@@ -405,11 +547,26 @@
       <geometry>
         <mesh filename="../meshes/calf.dae" scale="1 1 1" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <inertial>
-      <origin rpy="0 0 0" xyz="0.006286 0.001307 -0.122269" />
-      <mass value="0.158015" />
-      <inertia ixx="0.003607648222" ixy="1.494971e-06" ixz="-0.000132778525" iyy="0.003626771492" iyz="-2.8638535e-05" izz="3.5148003e-05" />
+      <origin rpy="0 0 0" xyz="0.006197 0.001408 -0.116695" />
+      <mass value="0.135862" />
+      <inertia ixx="0.001088793059" ixy="-2.55679e-07" ixz="7.117814e-06" iyy="0.001100428748" iyz="2.077264e-06" izz="2.4787446e-05" />
+    </inertial>
+  </link>
+  <link name="FR_calf_rotor">
+    <visual>
+      <origin rpy="1.5707963267948966 0 0" xyz="0 0 0" />
+      <geometry>
+        <cylinder length="0.02" radius="0.035" />
+      </geometry>
+      <material name="green" />
+    </visual>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.0 0.0 0.0" />
+      <mass value="0.089" />
+      <inertia ixx="5.9647e-05" ixy="0.0" ixz="0.0" iyy="0.000111842" iyz="0.0" izz="5.9647e-05" />
     </inertial>
   </link>
   <joint name="FR_foot_fixed" type="fixed" dont_collapse="true">
@@ -423,6 +580,7 @@
       <geometry>
         <sphere radius="0.01" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -470,8 +628,13 @@
     <parent link="trunk" />
     <child link="FL_hip" />
     <axis xyz="1 0 0" />
-    <dynamics damping="0" friction="0" />
-    <limit effort="33.5" lower="-0.8028514559173915" upper="0.8028514559173915" velocity="21" />
+    <dynamics damping="0.0" friction="0.0" />
+    <limit effort="23.7" lower="-0.863" upper="0.863" velocity="30.1" />
+  </joint>
+  <joint name="FL_hip_rotor_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0.11215 0.04675 0" />
+    <parent link="trunk" />
+    <child link="FL_hip_rotor" />
   </joint>
   <link name="FL_hip">
     <visual>
@@ -479,28 +642,40 @@
       <geometry>
         <mesh filename="../meshes/hip.dae" scale="1 1 1" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <inertial>
-      <origin rpy="0 0 0" xyz="-0.00541 -0.00074 6e-06" />
-      <mass value="0.510299" />
-      <inertia ixx="0.00030528937" ixy="-7.788013e-06" ixz="2.2016e-07" iyy="0.000590894859" iyz="-1.7175e-08" izz="0.000396594572" />
+      <origin rpy="0 0 0" xyz="-0.005657 -0.008752 -0.000102" />
+      <mass value="0.591" />
+      <inertia ixx="0.000334008405" ixy="-1.0826066e-05" ixz="1.290732e-06" iyy="0.000619101213" iyz="1.643194e-06" izz="0.00040057614" />
     </inertial>
   </link>
-  <joint name="FL_hip_fixed" type="fixed">
-    <origin rpy="0 0 0" xyz="0 0.08 0" />
-    <parent link="FL_hip" />
-    <child link="FL_thigh_shoulder" />
-  </joint>
-  <link name="FL_thigh_shoulder">
-    
+  <link name="FL_hip_rotor">
+    <visual>
+      <origin rpy="0 1.5707963267948966 0" xyz="0 0 0" />
+      <geometry>
+        <cylinder length="0.02" radius="0.035" />
+      </geometry>
+      <material name="green" />
+    </visual>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.0 0.0 0.0" />
+      <mass value="0.089" />
+      <inertia ixx="0.000111842" ixy="0.0" ixz="0.0" iyy="5.9647e-05" iyz="0.0" izz="5.9647e-05" />
+    </inertial>
   </link>
   <joint name="FL_thigh_joint" type="revolute">
     <origin rpy="0 0 0" xyz="0 0.08 0" />
     <parent link="FL_hip" />
     <child link="FL_thigh" />
     <axis xyz="0 1 0" />
-    <dynamics damping="0" friction="0" />
-    <limit effort="33.5" lower="-1.0471975511965976" upper="4.1887902047863905" velocity="21" />
+    <dynamics damping="0.0" friction="0.0" />
+    <limit effort="23.7" lower="-0.686" upper="4.501" velocity="30.1" />
+  </joint>
+  <joint name="FL_thigh_rotor_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0.0 -0.00015 0" />
+    <parent link="FL_hip" />
+    <child link="FL_thigh_rotor" />
   </joint>
   <link name="FL_thigh">
     <visual>
@@ -508,11 +683,26 @@
       <geometry>
         <mesh filename="../meshes/thigh.dae" scale="1 1 1" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <inertial>
-      <origin rpy="0 0 0" xyz="-0.003468 -0.018947 -0.032736" />
-      <mass value="0.898919" />
-      <inertia ixx="0.005395867678" ixy="1.02809e-07" ixz="0.000337529085" iyy="0.005142451046" iyz="-5.816563e-06" izz="0.00102478732" />
+      <origin rpy="0 0 0" xyz="-0.003342 -0.018054 -0.033451" />
+      <mass value="0.92" />
+      <inertia ixx="0.004431760472" ixy="5.7496807e-05" ixz="-0.000218457134" iyy="0.004485671726" iyz="0.000572001265" izz="0.000740309489" />
+    </inertial>
+  </link>
+  <link name="FL_thigh_rotor">
+    <visual>
+      <origin rpy="1.5707963267948966 0 0" xyz="0 0 0" />
+      <geometry>
+        <cylinder length="0.02" radius="0.035" />
+      </geometry>
+      <material name="green" />
+    </visual>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.0 0.0 0.0" />
+      <mass value="0.089" />
+      <inertia ixx="5.9647e-05" ixy="0.0" ixz="0.0" iyy="0.000111842" iyz="0.0" izz="5.9647e-05" />
     </inertial>
   </link>
   <joint name="FL_calf_joint" type="revolute">
@@ -520,8 +710,13 @@
     <parent link="FL_thigh" />
     <child link="FL_calf" />
     <axis xyz="0 1 0" />
-    <dynamics damping="0" friction="0" />
-    <limit effort="33.5" lower="-2.6965336943312392" upper="-0.9162978572970231" velocity="21" />
+    <dynamics damping="0.0" friction="0.0" />
+    <limit effort="35.55" lower="-2.818" upper="-0.888" velocity="20.06" />
+  </joint>
+  <joint name="FL_calf_rotor_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0.0 -0.03235 0" />
+    <parent link="FL_thigh" />
+    <child link="FL_calf_rotor" />
   </joint>
   <link name="FL_calf">
     <visual>
@@ -529,11 +724,26 @@
       <geometry>
         <mesh filename="../meshes/calf.dae" scale="1 1 1" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <inertial>
-      <origin rpy="0 0 0" xyz="0.006286 0.001307 -0.122269" />
-      <mass value="0.158015" />
-      <inertia ixx="0.003607648222" ixy="1.494971e-06" ixz="-0.000132778525" iyy="0.003626771492" iyz="-2.8638535e-05" izz="3.5148003e-05" />
+      <origin rpy="0 0 0" xyz="0.006197 0.001408 -0.116695" />
+      <mass value="0.135862" />
+      <inertia ixx="0.001088793059" ixy="-2.55679e-07" ixz="7.117814e-06" iyy="0.001100428748" iyz="2.077264e-06" izz="2.4787446e-05" />
+    </inertial>
+  </link>
+  <link name="FL_calf_rotor">
+    <visual>
+      <origin rpy="1.5707963267948966 0 0" xyz="0 0 0" />
+      <geometry>
+        <cylinder length="0.02" radius="0.035" />
+      </geometry>
+      <material name="green" />
+    </visual>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.0 0.0 0.0" />
+      <mass value="0.089" />
+      <inertia ixx="5.9647e-05" ixy="0.0" ixz="0.0" iyy="0.000111842" iyz="0.0" izz="5.9647e-05" />
     </inertial>
   </link>
   <joint name="FL_foot_fixed" type="fixed" dont_collapse="true">
@@ -547,6 +757,7 @@
       <geometry>
         <sphere radius="0.01" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -594,8 +805,13 @@
     <parent link="trunk" />
     <child link="RR_hip" />
     <axis xyz="1 0 0" />
-    <dynamics damping="0" friction="0" />
-    <limit effort="33.5" lower="-0.8028514559173915" upper="0.8028514559173915" velocity="21" />
+    <dynamics damping="0.0" friction="0.0" />
+    <limit effort="23.7" lower="-0.863" upper="0.863" velocity="30.1" />
+  </joint>
+  <joint name="RR_hip_rotor_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="-0.11215 -0.04675 0" />
+    <parent link="trunk" />
+    <child link="RR_hip_rotor" />
   </joint>
   <link name="RR_hip">
     <visual>
@@ -603,28 +819,40 @@
       <geometry>
         <mesh filename="../meshes/hip.dae" scale="1 1 1" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <inertial>
-      <origin rpy="0 0 0" xyz="0.00541 0.00074 6e-06" />
-      <mass value="0.510299" />
-      <inertia ixx="0.00030528937" ixy="-7.788013e-06" ixz="-2.2016e-07" iyy="0.000590894859" iyz="1.7175e-08" izz="0.000396594572" />
+      <origin rpy="0 0 0" xyz="0.005657 0.008752 -0.000102" />
+      <mass value="0.591" />
+      <inertia ixx="0.000334008405" ixy="-1.0826066e-05" ixz="-1.290732e-06" iyy="0.000619101213" iyz="-1.643194e-06" izz="0.00040057614" />
     </inertial>
   </link>
-  <joint name="RR_hip_fixed" type="fixed">
-    <origin rpy="0 0 0" xyz="0 -0.08 0" />
-    <parent link="RR_hip" />
-    <child link="RR_thigh_shoulder" />
-  </joint>
-  <link name="RR_thigh_shoulder">
-    
+  <link name="RR_hip_rotor">
+    <visual>
+      <origin rpy="0 1.5707963267948966 0" xyz="0 0 0" />
+      <geometry>
+        <cylinder length="0.02" radius="0.035" />
+      </geometry>
+      <material name="green" />
+    </visual>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.0 0.0 0.0" />
+      <mass value="0.089" />
+      <inertia ixx="0.000111842" ixy="0.0" ixz="0.0" iyy="5.9647e-05" iyz="0.0" izz="5.9647e-05" />
+    </inertial>
   </link>
   <joint name="RR_thigh_joint" type="revolute">
     <origin rpy="0 0 0" xyz="0 -0.08 0" />
     <parent link="RR_hip" />
     <child link="RR_thigh" />
     <axis xyz="0 1 0" />
-    <dynamics damping="0" friction="0" />
-    <limit effort="33.5" lower="-1.0471975511965976" upper="4.1887902047863905" velocity="21" />
+    <dynamics damping="0.0" friction="0.0" />
+    <limit effort="23.7" lower="-0.686" upper="4.501" velocity="30.1" />
+  </joint>
+  <joint name="RR_thigh_rotor_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0.0 0.00015 0" />
+    <parent link="RR_hip" />
+    <child link="RR_thigh_rotor" />
   </joint>
   <link name="RR_thigh">
     <visual>
@@ -632,11 +860,26 @@
       <geometry>
         <mesh filename="../meshes/thigh_mirror.dae" scale="1 1 1" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <inertial>
-      <origin rpy="0 0 0" xyz="-0.003468 0.018947 -0.032736" />
-      <mass value="0.898919" />
-      <inertia ixx="0.005395867678" ixy="-1.02809e-07" ixz="0.000337529085" iyy="0.005142451046" iyz="5.816563e-06" izz="0.00102478732" />
+      <origin rpy="0 0 0" xyz="-0.003342 0.018054 -0.033451" />
+      <mass value="0.92" />
+      <inertia ixx="0.004431760472" ixy="-5.7496807e-05" ixz="-0.000218457134" iyy="0.004485671726" iyz="-0.000572001265" izz="0.000740309489" />
+    </inertial>
+  </link>
+  <link name="RR_thigh_rotor">
+    <visual>
+      <origin rpy="1.5707963267948966 0 0" xyz="0 0 0" />
+      <geometry>
+        <cylinder length="0.02" radius="0.035" />
+      </geometry>
+      <material name="green" />
+    </visual>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.0 0.0 0.0" />
+      <mass value="0.089" />
+      <inertia ixx="5.9647e-05" ixy="0.0" ixz="0.0" iyy="0.000111842" iyz="0.0" izz="5.9647e-05" />
     </inertial>
   </link>
   <joint name="RR_calf_joint" type="revolute">
@@ -644,8 +887,13 @@
     <parent link="RR_thigh" />
     <child link="RR_calf" />
     <axis xyz="0 1 0" />
-    <dynamics damping="0" friction="0" />
-    <limit effort="33.5" lower="-2.6965336943312392" upper="-0.9162978572970231" velocity="21" />
+    <dynamics damping="0.0" friction="0.0" />
+    <limit effort="35.55" lower="-2.818" upper="-0.888" velocity="20.06" />
+  </joint>
+  <joint name="RR_calf_rotor_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0.0 0.03235 0" />
+    <parent link="RR_thigh" />
+    <child link="RR_calf_rotor" />
   </joint>
   <link name="RR_calf">
     <visual>
@@ -653,11 +901,26 @@
       <geometry>
         <mesh filename="../meshes/calf.dae" scale="1 1 1" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <inertial>
-      <origin rpy="0 0 0" xyz="0.006286 0.001307 -0.122269" />
-      <mass value="0.158015" />
-      <inertia ixx="0.003607648222" ixy="1.494971e-06" ixz="-0.000132778525" iyy="0.003626771492" iyz="-2.8638535e-05" izz="3.5148003e-05" />
+      <origin rpy="0 0 0" xyz="0.006197 0.001408 -0.116695" />
+      <mass value="0.135862" />
+      <inertia ixx="0.001088793059" ixy="-2.55679e-07" ixz="7.117814e-06" iyy="0.001100428748" iyz="2.077264e-06" izz="2.4787446e-05" />
+    </inertial>
+  </link>
+  <link name="RR_calf_rotor">
+    <visual>
+      <origin rpy="1.5707963267948966 0 0" xyz="0 0 0" />
+      <geometry>
+        <cylinder length="0.02" radius="0.035" />
+      </geometry>
+      <material name="green" />
+    </visual>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.0 0.0 0.0" />
+      <mass value="0.089" />
+      <inertia ixx="5.9647e-05" ixy="0.0" ixz="0.0" iyy="0.000111842" iyz="0.0" izz="5.9647e-05" />
     </inertial>
   </link>
   <joint name="RR_foot_fixed" type="fixed" dont_collapse="true">
@@ -671,6 +934,7 @@
       <geometry>
         <sphere radius="0.01" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -718,8 +982,13 @@
     <parent link="trunk" />
     <child link="RL_hip" />
     <axis xyz="1 0 0" />
-    <dynamics damping="0" friction="0" />
-    <limit effort="33.5" lower="-0.8028514559173915" upper="0.8028514559173915" velocity="21" />
+    <dynamics damping="0.0" friction="0.0" />
+    <limit effort="23.7" lower="-0.863" upper="0.863" velocity="30.1" />
+  </joint>
+  <joint name="RL_hip_rotor_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="-0.11215 0.04675 0" />
+    <parent link="trunk" />
+    <child link="RL_hip_rotor" />
   </joint>
   <link name="RL_hip">
     <visual>
@@ -727,28 +996,40 @@
       <geometry>
         <mesh filename="../meshes/hip.dae" scale="1 1 1" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <inertial>
-      <origin rpy="0 0 0" xyz="0.00541 -0.00074 6e-06" />
-      <mass value="0.510299" />
-      <inertia ixx="0.00030528937" ixy="7.788013e-06" ixz="-2.2016e-07" iyy="0.000590894859" iyz="-1.7175e-08" izz="0.000396594572" />
+      <origin rpy="0 0 0" xyz="0.005657 -0.008752 -0.000102" />
+      <mass value="0.591" />
+      <inertia ixx="0.000334008405" ixy="1.0826066e-05" ixz="-1.290732e-06" iyy="0.000619101213" iyz="1.643194e-06" izz="0.00040057614" />
     </inertial>
   </link>
-  <joint name="RL_hip_fixed" type="fixed">
-    <origin rpy="0 0 0" xyz="0 0.08 0" />
-    <parent link="RL_hip" />
-    <child link="RL_thigh_shoulder" />
-  </joint>
-  <link name="RL_thigh_shoulder">
-    
+  <link name="RL_hip_rotor">
+    <visual>
+      <origin rpy="0 1.5707963267948966 0" xyz="0 0 0" />
+      <geometry>
+        <cylinder length="0.02" radius="0.035" />
+      </geometry>
+      <material name="green" />
+    </visual>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.0 0.0 0.0" />
+      <mass value="0.089" />
+      <inertia ixx="0.000111842" ixy="0.0" ixz="0.0" iyy="5.9647e-05" iyz="0.0" izz="5.9647e-05" />
+    </inertial>
   </link>
   <joint name="RL_thigh_joint" type="revolute">
     <origin rpy="0 0 0" xyz="0 0.08 0" />
     <parent link="RL_hip" />
     <child link="RL_thigh" />
     <axis xyz="0 1 0" />
-    <dynamics damping="0" friction="0" />
-    <limit effort="33.5" lower="-1.0471975511965976" upper="4.1887902047863905" velocity="21" />
+    <dynamics damping="0.0" friction="0.0" />
+    <limit effort="23.7" lower="-0.686" upper="4.501" velocity="30.1" />
+  </joint>
+  <joint name="RL_thigh_rotor_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0.0 -0.00015 0" />
+    <parent link="RL_hip" />
+    <child link="RL_thigh_rotor" />
   </joint>
   <link name="RL_thigh">
     <visual>
@@ -756,11 +1037,26 @@
       <geometry>
         <mesh filename="../meshes/thigh.dae" scale="1 1 1" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <inertial>
-      <origin rpy="0 0 0" xyz="-0.003468 -0.018947 -0.032736" />
-      <mass value="0.898919" />
-      <inertia ixx="0.005395867678" ixy="1.02809e-07" ixz="0.000337529085" iyy="0.005142451046" iyz="-5.816563e-06" izz="0.00102478732" />
+      <origin rpy="0 0 0" xyz="-0.003342 -0.018054 -0.033451" />
+      <mass value="0.92" />
+      <inertia ixx="0.004431760472" ixy="5.7496807e-05" ixz="-0.000218457134" iyy="0.004485671726" iyz="0.000572001265" izz="0.000740309489" />
+    </inertial>
+  </link>
+  <link name="RL_thigh_rotor">
+    <visual>
+      <origin rpy="1.5707963267948966 0 0" xyz="0 0 0" />
+      <geometry>
+        <cylinder length="0.02" radius="0.035" />
+      </geometry>
+      <material name="green" />
+    </visual>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.0 0.0 0.0" />
+      <mass value="0.089" />
+      <inertia ixx="5.9647e-05" ixy="0.0" ixz="0.0" iyy="0.000111842" iyz="0.0" izz="5.9647e-05" />
     </inertial>
   </link>
   <joint name="RL_calf_joint" type="revolute">
@@ -768,8 +1064,13 @@
     <parent link="RL_thigh" />
     <child link="RL_calf" />
     <axis xyz="0 1 0" />
-    <dynamics damping="0" friction="0" />
-    <limit effort="33.5" lower="-2.6965336943312392" upper="-0.9162978572970231" velocity="21" />
+    <dynamics damping="0.0" friction="0.0" />
+    <limit effort="35.55" lower="-2.818" upper="-0.888" velocity="20.06" />
+  </joint>
+  <joint name="RL_calf_rotor_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0.0 -0.03235 0" />
+    <parent link="RL_thigh" />
+    <child link="RL_calf_rotor" />
   </joint>
   <link name="RL_calf">
     <visual>
@@ -777,11 +1078,26 @@
       <geometry>
         <mesh filename="../meshes/calf.dae" scale="1 1 1" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <inertial>
-      <origin rpy="0 0 0" xyz="0.006286 0.001307 -0.122269" />
-      <mass value="0.158015" />
-      <inertia ixx="0.003607648222" ixy="1.494971e-06" ixz="-0.000132778525" iyy="0.003626771492" iyz="-2.8638535e-05" izz="3.5148003e-05" />
+      <origin rpy="0 0 0" xyz="0.006197 0.001408 -0.116695" />
+      <mass value="0.135862" />
+      <inertia ixx="0.001088793059" ixy="-2.55679e-07" ixz="7.117814e-06" iyy="0.001100428748" iyz="2.077264e-06" izz="2.4787446e-05" />
+    </inertial>
+  </link>
+  <link name="RL_calf_rotor">
+    <visual>
+      <origin rpy="1.5707963267948966 0 0" xyz="0 0 0" />
+      <geometry>
+        <cylinder length="0.02" radius="0.035" />
+      </geometry>
+      <material name="green" />
+    </visual>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.0 0.0 0.0" />
+      <mass value="0.089" />
+      <inertia ixx="5.9647e-05" ixy="0.0" ixz="0.0" iyy="0.000111842" iyz="0.0" izz="5.9647e-05" />
     </inertial>
   </link>
   <joint name="RL_foot_fixed" type="fixed" dont_collapse="true">
@@ -795,6 +1111,7 @@
       <geometry>
         <sphere radius="0.01" />
       </geometry>
+      <!-- <material name="orange"/> -->
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -863,6 +1180,7 @@
   <link name="camera_optical_face">
         </link>
   <gazebo reference="camera_face">
+    <!-- <material>Gazebo/Black</material> -->
     <sensor name="camera_face_camera" type="depth">
       <update_rate>16</update_rate>
       <camera>
@@ -886,6 +1204,7 @@
         <cameraInfoTopicName>/camera_face/color/camera_info</cameraInfoTopicName>
         <depthImageTopicName>/camera_face/depth/image_raw</depthImageTopicName>
         <depthImageInfoTopicName>/camera_face/depth/camera_info</depthImageInfoTopicName>
+        <!-- <pointCloudTopicName>/camera_${name}/depth/points</pointCloudTopicName> -->
         <pointCloudTopicName>/cam1/point_cloud_face</pointCloudTopicName>
         <frameName>camera_optical_face</frameName>
         <pointCloudCutoff>0.1</pointCloudCutoff>
@@ -929,6 +1248,7 @@
   <link name="camera_optical_chin">
         </link>
   <gazebo reference="camera_chin">
+    <!-- <material>Gazebo/Black</material> -->
     <sensor name="camera_chin_camera" type="depth">
       <update_rate>16</update_rate>
       <camera>
@@ -952,6 +1272,7 @@
         <cameraInfoTopicName>/camera_chin/color/camera_info</cameraInfoTopicName>
         <depthImageTopicName>/camera_chin/depth/image_raw</depthImageTopicName>
         <depthImageInfoTopicName>/camera_chin/depth/camera_info</depthImageInfoTopicName>
+        <!-- <pointCloudTopicName>/camera_${name}/depth/points</pointCloudTopicName> -->
         <pointCloudTopicName>/cam2/point_cloud_chin</pointCloudTopicName>
         <frameName>camera_optical_chin</frameName>
         <pointCloudCutoff>0.1</pointCloudCutoff>
@@ -995,6 +1316,7 @@
   <link name="camera_optical_left">
         </link>
   <gazebo reference="camera_left">
+    <!-- <material>Gazebo/Black</material> -->
     <sensor name="camera_left_camera" type="depth">
       <update_rate>16</update_rate>
       <camera>
@@ -1018,6 +1340,7 @@
         <cameraInfoTopicName>/camera_left/color/camera_info</cameraInfoTopicName>
         <depthImageTopicName>/camera_left/depth/image_raw</depthImageTopicName>
         <depthImageInfoTopicName>/camera_left/depth/camera_info</depthImageInfoTopicName>
+        <!-- <pointCloudTopicName>/camera_${name}/depth/points</pointCloudTopicName> -->
         <pointCloudTopicName>/cam3/point_cloud_left</pointCloudTopicName>
         <frameName>camera_optical_left</frameName>
         <pointCloudCutoff>0.1</pointCloudCutoff>
@@ -1061,6 +1384,7 @@
   <link name="camera_optical_right">
         </link>
   <gazebo reference="camera_right">
+    <!-- <material>Gazebo/Black</material> -->
     <sensor name="camera_right_camera" type="depth">
       <update_rate>16</update_rate>
       <camera>
@@ -1084,6 +1408,7 @@
         <cameraInfoTopicName>/camera_right/color/camera_info</cameraInfoTopicName>
         <depthImageTopicName>/camera_right/depth/image_raw</depthImageTopicName>
         <depthImageInfoTopicName>/camera_right/depth/camera_info</depthImageInfoTopicName>
+        <!-- <pointCloudTopicName>/camera_${name}/depth/points</pointCloudTopicName> -->
         <pointCloudTopicName>/cam4/point_cloud_right</pointCloudTopicName>
         <frameName>camera_optical_right</frameName>
         <pointCloudCutoff>0.1</pointCloudCutoff>
@@ -1127,6 +1452,7 @@
   <link name="camera_optical_rearDown">
         </link>
   <gazebo reference="camera_rearDown">
+    <!-- <material>Gazebo/Black</material> -->
     <sensor name="camera_rearDown_camera" type="depth">
       <update_rate>16</update_rate>
       <camera>
@@ -1150,6 +1476,7 @@
         <cameraInfoTopicName>/camera_rearDown/color/camera_info</cameraInfoTopicName>
         <depthImageTopicName>/camera_rearDown/depth/image_raw</depthImageTopicName>
         <depthImageInfoTopicName>/camera_rearDown/depth/camera_info</depthImageInfoTopicName>
+        <!-- <pointCloudTopicName>/camera_${name}/depth/points</pointCloudTopicName> -->
         <pointCloudTopicName>/cam5/point_cloud_rearDown</pointCloudTopicName>
         <frameName>camera_optical_rearDown</frameName>
         <pointCloudCutoff>0.1</pointCloudCutoff>
@@ -1237,20 +1564,5 @@
       <origin rpy="0 0 0" xyz="0 0 0" />
       <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6" />
     </inertial>
-  </link>
-  <link name="d435_bottom_screw_frame" />
-  <joint name="d435_joint" type="fixed">
-    <origin rpy="0 0.5235987755982988 0" xyz="0.26 0.0 0.12" />
-    <parent link="trunk" />
-    <child link="d435_bottom_screw_frame" />
-  </joint>
-  <joint name="d435_link_joint" type="fixed">
-    <origin xyz="0.0106 0.0175 0.0125" rpy="0 0 0" />
-    <parent link="d435_bottom_screw_frame" />
-    <child link="d435_link" />
-  </joint>
-  <link name="d435_link">
-    
-    
   </link>
 </robot>

@@ -37,7 +37,9 @@ def main():
     print("STEP: robot.reset()...", flush=True)
     robot.reset()
     print("STEP: sim.step()...", flush=True)
+    robot.write_data_to_sim()
     sim.step()
+    robot.update(sim.get_physics_dt())
     print("STEP: done stepping", flush=True)
 
     print("=" * 60)
@@ -54,8 +56,53 @@ def main():
     print("-" * 60)
     print(f"default_joint_pos (env 0): {robot.data.default_joint_pos[0].tolist()}")
 
-    # MERGE VERIFICATION: with merge_fixed_joints=True, the mass-bearing *_foot links
-    # (0.06 kg, with collision) must survive as distinct bodies, keep their mass, and
+    # LIMIT VERIFICATION: actuator limits are intentionally not duplicated in
+    # go1_asset.py. They must propagate from Unitree's URDF through the importer.
+    expected_limits = {
+        "hip": (-0.863, 0.863, 30.1, 23.7),
+        "thigh": (-0.686, 4.501, 30.1, 23.7),
+        "calf": (-2.818, -0.888, 20.06, 35.55),
+    }
+    limit_errors = []
+    print("=" * 60)
+    print("LIMIT VERIFICATION (position / velocity / effort from official URDF)")
+    for joint_id, joint_name in enumerate(robot.data.joint_names):
+        joint_type = next(name for name in expected_limits if f"_{name}_joint" in joint_name)
+        expected_lower, expected_upper, expected_velocity, _ = expected_limits[joint_type]
+        actual_position = robot.data.joint_pos_limits[0, joint_id]
+        actual_velocity = robot.data.joint_vel_limits[0, joint_id]
+        actual_soft_velocity = robot.data.soft_joint_vel_limits[0, joint_id]
+        print(
+            f"  {joint_name:16s} pos=[{actual_position[0]:+.3f}, {actual_position[1]:+.3f}]"
+            f" vel={actual_velocity:.2f} soft_vel={actual_soft_velocity:.2f}"
+        )
+        expected_position = torch.tensor(
+            [expected_lower, expected_upper], device=actual_position.device, dtype=actual_position.dtype
+        )
+        if not torch.allclose(actual_position, expected_position, atol=1.0e-4, rtol=0.0):
+            limit_errors.append(f"{joint_name} position")
+        if not torch.isclose(
+            actual_velocity, actual_velocity.new_tensor(expected_velocity), atol=1.0e-4, rtol=0.0
+        ):
+            limit_errors.append(f"{joint_name} simulation velocity")
+        if not torch.isclose(
+            actual_soft_velocity, actual_soft_velocity.new_tensor(expected_velocity), atol=1.0e-4, rtol=0.0
+        ):
+            limit_errors.append(f"{joint_name} actuator velocity")
+
+    for actuator_name, actuator in robot.actuators.items():
+        expected_effort = expected_limits[actuator_name][3]
+        print(f"  actuator {actuator_name:6s} effort={actuator.effort_limit[0].tolist()}")
+        if not torch.allclose(
+            actuator.effort_limit,
+            torch.full_like(actuator.effort_limit, expected_effort),
+            atol=1.0e-4,
+            rtol=0.0,
+        ):
+            limit_errors.append(f"{actuator_name} actuator effort")
+
+    # MERGE VERIFICATION: with merge_fixed_joints=True, the *_foot_fixed joints carry
+    # dont_collapse=true, so the 0.06 kg foot links must survive as distinct bodies and
     # keep their frame at the leg tip. A buggy merge would (a) drop them (find_bodies
     # returns empty), (b) fold their mass into the calf, or (c) leave a stale/offset
     # frame so body_pos_w[foot] points at the calf.
@@ -76,10 +123,13 @@ def main():
     dz = foot_pos[:, 2] - calf_pos[:, 2]
     print(f"  foot_z - calf_z = {[f'{d:+.3f}' for d in dz]}   (all must be negative: feet below calf)")
     total_mass = robot.data.default_mass[0].sum().item()
-    print(f"  total body mass = {total_mass:.4f} kg   (URDF sum = 11.3100 -> merge must conserve mass)")
+    print(f"  total body mass = {total_mass:.4f} kg   (official URDF sum = 13.1005 -> merge must conserve mass)")
     if "base" in robot.data.body_names:
         bix = robot.data.body_names.index("base")
-        print(f"  'base' (merged trunk) mass = {robot.data.default_mass[0, bix].item():.4f} kg   (expect ~4.801 = 4.8 trunk + 0.001 imu)")
+        print(
+            f"  'base' (merged trunk) mass = {robot.data.default_mass[0, bix].item():.4f} kg"
+            "   (expect ~5.5611: trunk + imu + four hip rotors + auxiliary sensors)"
+        )
 
     # Verify the names the locomotion framework depends on.
     print("=" * 60)
@@ -107,10 +157,13 @@ def main():
             print(f"  joint '{name}' -> {names}")
 
     print("=" * 60)
-    if not missing_bodies and not missing_joints and robot.num_joints == 12:
-        print("PASS: all required bodies/joints found, 12 actuated joints.")
+    if not missing_bodies and not missing_joints and not limit_errors and robot.num_joints == 12:
+        print("PASS: all required bodies/joints and official limits found, 12 actuated joints.")
     else:
-        print(f"FAIL: missing bodies={missing_bodies}, missing joints={missing_joints}, num_joints={robot.num_joints}")
+        print(
+            f"FAIL: missing bodies={missing_bodies}, missing joints={missing_joints},"
+            f" limit errors={limit_errors}, num_joints={robot.num_joints}"
+        )
 
 
 if __name__ == "__main__":

@@ -3,18 +3,19 @@
 The GO1 is a 12-DOF quadruped (4 legs x hip/thigh/calf revolute joints), driven by
 delayed PD actuators (``DelayedPDActuatorCfg``).  No actuator identification is
 available yet, so the motors use nominal PD gains, the effort/velocity limits parsed
-from the URDF (``<limit>`` tags), and a small placeholder command delay (0-2 physics
-steps, randomized per-env at reset) to model real control latency for sim-to-real.
+from Unitree's official URDF (``<limit>`` tags), and a small placeholder command delay
+(0-2 physics steps, randomized per-env at reset) to model real control latency for
+sim-to-real.
 Once real friction / encoder-bias / delay parameters are identified, the actuator group
 can be upgraded to ``IdentifiedActuatorElectricCfg`` or ``PaceDCMotorCfg`` without
 touching the rest of the config.
 
 URDF import notes
 -----------------
-* ``merge_fixed_joints=True`` (default) consolidates the mass-less dummy links (``base``
-  frame, ``imu_link``, cameras, ultraSound) into the ``trunk`` body, which becomes the
-  ``base`` rigid body (~4.8 kg).  The four ``*_foot`` links carry mass (0.06 kg) and are
-  preserved as distinct bodies, so ``find_bodies(["FL_foot", ...])`` still works.
+* ``merge_fixed_joints=True`` (default) consolidates fixed auxiliary links (``base``
+  frame, rotor visualizations, cameras, and ultraSound) into their parent bodies. The
+  four ``*_foot_fixed`` joints carry ``dont_collapse=true`` so the foot links remain
+  distinct bodies and ``find_bodies(["FL_foot", ...])`` still works.
   Using ``merge_fixed_joints=False`` leaves the mass-less ``base`` as a zero-mass floating
   root, which PhysX cannot initialize (it hangs) -- so it must stay True.
 * The actuator groups are named ``hip``/``thigh``/``calf`` to match the asymmetric-critic
@@ -62,8 +63,6 @@ def _assert_urdf_exists() -> str:
 
 GO1_HIP_ACTUATOR_CFG = DelayedPDActuatorCfg(
     joint_names_expr=[".*_hip_joint"],
-    effort_limit=23.7,
-    velocity_limit=30.1,
     stiffness=GO1_STIFFNESS,
     damping=GO1_DAMPING,
     armature=GO1_ARMATURE,
@@ -73,8 +72,6 @@ GO1_HIP_ACTUATOR_CFG = DelayedPDActuatorCfg(
 
 GO1_THIGH_ACTUATOR_CFG = DelayedPDActuatorCfg(
     joint_names_expr=[".*_thigh_joint"],
-    effort_limit=23.7,
-    velocity_limit=30.1,
     stiffness=GO1_STIFFNESS,
     damping=GO1_DAMPING,
     armature=GO1_ARMATURE,
@@ -84,8 +81,6 @@ GO1_THIGH_ACTUATOR_CFG = DelayedPDActuatorCfg(
 
 GO1_CALF_ACTUATOR_CFG = DelayedPDActuatorCfg(
     joint_names_expr=[".*_calf_joint"],
-    effort_limit=35.55,
-    velocity_limit=20.06,
     stiffness=GO1_STIFFNESS,
     damping=GO1_DAMPING,
     armature=GO1_ARMATURE,
@@ -99,7 +94,7 @@ GO1_CFG = ArticulationCfg(
         asset_path=_assert_urdf_exists(),
         fix_base=False,
         # Keep True: merges the mass-less `base` frame into `trunk` (the real body) while
-        # preserving the mass-bearing `*_foot` links as separate bodies.
+        # the URDF's `dont_collapse` flags preserve `*_foot` as separate sensor bodies.
         merge_fixed_joints=True,
         make_instanceable=True,
         joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
