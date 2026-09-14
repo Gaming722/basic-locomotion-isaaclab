@@ -350,3 +350,22 @@ is unaffected. This is a nominal manufacturer-model correction, not a substitute
 for measuring the actual robot installation or per-device calibration.
 
 Source: [RealSense official D435 model](https://github.com/realsenseai/realsense-ros/blob/ros2-master/realsense2_description/urdf/_d435.urdf.xacro).
+
+
+### Rotate video subjects across terrains
+
+Add `--rotate_video_env` with `--video --dual_pane`. Training and evaluation
+start with `--follow_env` (default 600), then cycle the available terrain groups
+at each clip boundary. Within a clip both panes follow the same selected env.
+Files include its ID (`dual_step-10000_env-700.mp4`); the log reports the
+subject, terrain group and starting terrain level. Environment resets may still
+change its location/difficulty during a clip, as in fixed-subject recording.
+
+For curriculum terrains, groups use the generator's normalized proportion and
+column assignment. For random non-curriculum terrain generation, exact type is
+not available from the importer; rotation uses columns and logs `column-N`.
+Tiled row-major spacing is handled separately. No terrain or command is changed.
+With >500 envs and random commands, envs 0-499 are excluded because they stand
+still; only terrain groups occupied by moving envs can be covered. A single
+terrain configuration can vary subject/difficulty but cannot introduce other types.
+Without the flag, video subject stays fixed. Rotation requires dual-pane video.

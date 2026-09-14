@@ -34,6 +34,8 @@ parser.add_argument("--cam_side", type=float, default=0.0,
                     help="Lateral offset of the follow camera (m, +x = robot's left). Use e.g. 2.0 for a 3/4 view.")
 parser.add_argument("--dual_pane", action="store_true", default=False,
                     help="Record side-by-side video: left = Isaac Sim view, right = live grayscale depth.")
+parser.add_argument("--rotate_video_env", action="store_true",
+                    help="Rotate followed env across available terrain groups for each dual-pane video clip.")
 parser.add_argument("--follow_env", type=int, default=600,
                     help="Env index the camera/depth pane follow. GO1 envs 0-499 are command-zero (stand still); follow >=500.")
 parser.add_argument("--terrain", type=str, default="rough",
@@ -267,6 +269,7 @@ from basic_locomotion_isaaclab.assets.d435_geometry import (
 )
 from dagger_network import DaggerNet, DaggerReplayBuffer
 from depth_pipeline import PIPELINE_VERSION, preprocess_depth, depth_sequence_from_history
+from video_follow import rotating_video_env
 
 import isaaclab.utils.math as math_utils
 from isaacsim.core.utils.viewports import set_camera_view
@@ -525,6 +528,33 @@ def _effective_follow_env(follow_env: int, num_envs: int, has_fixed_cmd: bool) -
     return max(500, min(follow_env, num_envs - 1))
 
 
+def _video_follow_for_clip(env, clip_index):
+    terrain = env.unwrapped._terrain
+    gen = terrain.cfg.terrain_generator
+    num_envs = env.unwrapped.num_envs
+    first_env = 500 if num_envs > 500 and args_cli.cmd is None else 0
+    initial = _effective_follow_env(args_cli.follow_env, num_envs, args_cli.cmd is not None)
+    if gen is None:
+        columns = [0] * num_envs
+        proportions = None
+        num_columns = 1
+    else:
+        # Tiled spacing assigns row-major cells rather than importer terrain_types.
+        columns = ([i % gen.num_cols for i in range(num_envs)]
+                   if getattr(env.unwrapped.cfg, "enforce_env_spacing", False)
+                   else terrain.terrain_types.cpu().tolist())
+        proportions = ([(name, cfg.proportion) for name, cfg in gen.sub_terrains.items()]
+                       if gen.curriculum else None)
+        num_columns = gen.num_cols
+    selected, label = rotating_video_env(
+        columns, first_env=first_env, initial_env=initial, clip_index=clip_index,
+        num_columns=num_columns, terrain_proportions=proportions,
+    )
+    level = int(terrain.terrain_levels[selected]) if gen is not None else None
+    print(f"[INFO] Video subject: env={selected}, terrain={label}, level={level}, clip={clip_index}")
+    return selected
+
+
 def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
     """Roll an already-trained DAgger student (no teacher / replay / gradients / checkpoint saves).
 
@@ -571,6 +601,7 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
 
     dual_writer = None
     dual_frames_left = 0
+    video_clip_index = 0
     max_steps = args_cli.max_training_steps
     env_cfg = env.unwrapped.cfg
     print(
@@ -611,6 +642,11 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
                 history_capacity, -1, -1, -1, -1
             )
 
+        if (args_cli.rotate_video_env and dual_frames_left == 0
+                and step % args_cli.video_interval == 0):
+            follow_env = _video_follow_for_clip(env, video_clip_index)
+            video_clip_index += 1
+
         # Camera follow -- mirrors training loop (keep in sync).
         with torch.inference_mode():
             root_pos = robot.data.root_state_w[follow_env, :3]
@@ -624,7 +660,8 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
         if args_cli.video and args_cli.dual_pane:
             if dual_frames_left == 0 and step % args_cli.video_interval == 0:
                 dual_frames_left = args_cli.video_length
-                dual_fname = os.path.join(video_out_dir, f"dual_step-{step}.mp4")
+                dual_suffix = f"_env-{follow_env}" if args_cli.rotate_video_env else ""
+                dual_fname = os.path.join(video_out_dir, f"dual_step-{step}{dual_suffix}.mp4")
                 os.makedirs(os.path.dirname(dual_fname), exist_ok=True)
             if dual_frames_left > 0:
                 frame = _dual_pane_frame(env, env_index=follow_env,
@@ -671,6 +708,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         raise ValueError(f"--difficulty must be in [0.0, 1.0], got {args_cli.difficulty}")
     env_cfg.difficulty = args_cli.difficulty
     env_cfg.rebuild_terrain()  # __post_init__ already ran at hydra parse; rebuild with the CLI terrain
+    if args_cli.rotate_video_env and not (args_cli.video and args_cli.dual_pane):
+        raise ValueError("--rotate_video_env requires --video --dual_pane.")
+    if args_cli.video and (args_cli.video_interval <= 0 or args_cli.video_length <= 0):
+        raise ValueError("Video interval and length must be positive.")
     if args_cli.depth_history_length <= 0:
         raise ValueError("--depth_history_length must be positive.")
     if args_cli.depth_delay_frames < 0:
@@ -890,6 +931,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # dual-pane video recorder state
     dual_writer = None
     dual_frames_left = 0
+    video_clip_index = 0
+    follow_env = _effective_follow_env(args_cli.follow_env, num_envs, args_cli.cmd is not None)
 
     step = 0
     updates = 0
@@ -985,10 +1028,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 history_capacity, -1, -1, -1, -1
             )
 
-        # follow a walking env (>=500) so recorded videos show the robot moving
+        if (args_cli.rotate_video_env and dual_frames_left == 0
+                and step % args_cli.video_interval == 0):
+            follow_env = _video_follow_for_clip(env, video_clip_index)
+            video_clip_index += 1
+
+        # Follow one subject throughout each video clip.
         with torch.inference_mode():
-            root_pos = robot.data.root_state_w[args_cli.follow_env, :3]
-            yaw_q = math_utils.yaw_quat(robot.data.root_quat_w[args_cli.follow_env])
+            root_pos = robot.data.root_state_w[follow_env, :3]
+            yaw_q = math_utils.yaw_quat(robot.data.root_quat_w[follow_env])
             eye = root_pos + math_utils.quat_apply(yaw_q, eye_offset_b)
             tgt = root_pos + math_utils.quat_apply(yaw_q, tgt_offset_b)
         set_camera_view(eye.cpu().numpy(), tgt.cpu().numpy(), "/OmniverseKit_Persp")
@@ -997,10 +1045,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if args_cli.video and args_cli.dual_pane:
             if dual_frames_left == 0 and step % args_cli.video_interval == 0:
                 dual_frames_left = args_cli.video_length
-                dual_fname = os.path.join(video_out_dir, f"dual_step-{step}.mp4")
+                dual_suffix = f"_env-{follow_env}" if args_cli.rotate_video_env else ""
+                dual_fname = os.path.join(video_out_dir, f"dual_step-{step}{dual_suffix}.mp4")
                 os.makedirs(os.path.dirname(dual_fname), exist_ok=True)
             if dual_frames_left > 0:
-                frame = _dual_pane_frame(env, env_index=args_cli.follow_env,
+                frame = _dual_pane_frame(env, env_index=follow_env,
                                         student_depth=args_cli.dual_pane_student_depth)
                 if dual_writer is None:
                     dual_writer = cv2.VideoWriter(
