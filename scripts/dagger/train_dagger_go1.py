@@ -42,7 +42,7 @@ parser.add_argument("--difficulty", type=float, default=None,
                     help="Fixed terrain difficulty 0.0-1.0 applied to every sub-terrain (e.g. --difficulty 1.0 with "
                          "--terrain stairs gives all-max-height stairs). Default None = random per sub-terrain.")
 parser.add_argument("--dual_pane_student_depth", action="store_true", default=False,
-                    help="Show the student's sanitized depth (clip [0.1, 2.0], no-hit -> 1.0) in the dual-pane "
+                    help="Show the student's sanitized depth (clip [0.1, 2.0], invalid/no-hit -> 2.0) in the dual-pane "
                          "right pane instead of the raw camera depth.")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
@@ -86,12 +86,15 @@ parser.add_argument(
     help="Probability of dropping a depth pixel to the far-saturation code 2.0 "
          "(simulate D435 holes/invalid pixels). 0 disables.",
 )
+parser.add_argument("--depth_fps", type=float, default=30.0,
+                    help="Nominal sensor update rate; depth is read and written to history every control step.")
+parser.add_argument("--depth_min_z", type=float, default=0.0,
+                    help="Measured minimum valid depth in metres; 0 disables the near-invalid mask.")
 parser.add_argument(
     "--depth_delay_frames",
     type=int,
     default=1,
-    help="Delay (in env steps) of the depth frames fed to the student, modelling capture->inference "
-         "latency. Must be < --depth_history_length.",
+    help="Additional delay in control-step history entries; default 1 is 20 ms at 50 Hz.",
 )
 parser.add_argument(
     "--dagger_buffer_size",
@@ -234,7 +237,6 @@ import numpy as np
 
 import gymnasium as gym
 import torch
-import torch.nn.functional as F
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
@@ -260,94 +262,35 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 # PLACEHOLDER: Extension template (do not remove this comment)
 
+from basic_locomotion_isaaclab.assets.d435_geometry import (
+    D435_BOTTOM_SCREW_POSITION_BASE, D435_DEPTH_ORIGIN_IN_SCREW, D435_MOUNT_PITCH_DEG,
+)
 from dagger_network import DaggerNet, DaggerReplayBuffer
+from depth_pipeline import PIPELINE_VERSION, preprocess_depth, depth_sequence_from_history
 
 import isaaclab.utils.math as math_utils
 from isaacsim.core.utils.viewports import set_camera_view
 
 
-# Cache for the Gaussian blur kernels so they are built once per (size, sigma, device).
-_gaussian_kernel_cache: dict[tuple, torch.Tensor] = {}
-
-
-def _gaussian_kernel(kernel_size: int, sigma: float, device: torch.device) -> torch.Tensor:
-    """Return a (1, 1, k, k) normalized Gaussian blur kernel on ``device`` (cached)."""
-    key = (kernel_size, sigma, str(device))
-    kernel = _gaussian_kernel_cache.get(key)
-    if kernel is not None:
-        return kernel
-    coords = torch.arange(kernel_size, dtype=torch.float32, device=device) - (kernel_size - 1) / 2
-    g = torch.exp(-(coords**2) / (2 * sigma**2))
-    g = g / g.sum()
-    kernel = (g[:, None] * g[None, :]).view(1, 1, kernel_size, kernel_size)
-    _gaussian_kernel_cache[key] = kernel
-    return kernel
-
-
-def _apply_depth_sensor_noise(depth: torch.Tensor) -> torch.Tensor:
-    """Add D435-like artifacts to a (N, 1, H, W) depth image.
-
-    Order matters: optical blur first (there are no holes yet, so the blur does not smear
-    invalid pixels), then measurement noise, then dropout (holes) last so missing pixels stay
-    clean zeros. Parameters mirror the on-robot depth preprocessing -- keep them in sync with
-    the deploy side (--depth_*_... flags).
-    """
-    # 1) optical / downscale blur (Gaussian smoothing of the depth field).
-    #    F.pad(mode="replicate") before the conv avoids the zero-padding artifact where border
-    #    pixels get pulled toward 0 (which would read as a false "very near" border). Note:
-    #    done this way because some torch builds do not accept padding_mode= in F.conv2d.
-    if args_cli.depth_blur_sigma > 0:
-        kernel_size = max(3, int(2 * math.ceil(2 * args_cli.depth_blur_sigma) + 1))
-        kernel = _gaussian_kernel(kernel_size, args_cli.depth_blur_sigma, depth.device)
-        pad = kernel_size // 2
-        depth = F.pad(depth, (pad, pad, pad, pad), mode="replicate")
-        depth = F.conv2d(depth, kernel)
-
-    # 2) measurement noise (depth quantization / stereo error), then re-clamp so the student
-    #    input stays in the [0.1, 2.0] range the deploy pipeline is defined on.
-    if args_cli.depth_additive_noise_std > 0:
-        depth = depth + torch.randn_like(depth) * args_cli.depth_additive_noise_std
-    depth = depth.clip(0.1, 2.0)
-
-    # 3) missing pixels (holes) -> far-saturation (2.0), matching the "unmeasurable = far"
-    #    convention (no-hit -> 3.0 -> clip -> 2.0). The deploy side must map real D435 invalid
-    #    pixels (0) to 2.0 as well, so holes stay in-distribution.
-    if args_cli.depth_dropout_prob > 0:
-        drop = torch.rand(depth.shape, device=depth.device) < args_cli.depth_dropout_prob
-        depth = depth.masked_fill(drop, 2.0)
-
-    return depth
-
-
 def _sanitize_depth_data(env: RslRlVecEnvWrapper) -> torch.Tensor:
     if not hasattr(env.unwrapped, "_depth_camera"):
-        raise RuntimeError(
-            "The DAgger student needs env.unwrapped._depth_camera, matching collect_depth_to_heightmap.py. "
-            "Run this with a depth-enabled vision task/config."
-        )
-    depth_data = env.unwrapped._depth_camera.data.output["distance_to_image_plane"]
-    # Validated depth pipeline (Aliengo follow dagger): camera clipping_range=(0.01, 3.0)
-    # with depth_clipping_behavior="max" (no-hit -> 3.0); clip to [0.1, 2.0]: real depth
-    # in [0.01, 0.1] m saturates to 0.1 (near-saturation), beyond 2 m to 2.0 (far-saturation).
-    depth_data = torch.nan_to_num(depth_data, nan=0.0, posinf=1.0, neginf=-1.0)
-    depth_data = depth_data.clip(0.1, 2.0)
-    depth_data = depth_data.permute(0, 3, 1, 2).contiguous()
-    # D435-like sensor noise (blur -> measurement noise -> dropout holes).
-    depth_data = _apply_depth_sensor_noise(depth_data)
-    # D435 Min-Z alignment (env_cfg.depth_min_z): sub-Min-Z pixels (incl. blurred near-edges)
-    # become far-saturated like every other unmeasurable pixel (deploy maps real D435 0 -> 2.0).
-    # 0.0 disables (GO1 default).
-    depth_min_z = getattr(env.unwrapped.cfg, "depth_min_z", 0.0)
-    if depth_min_z > 0:
-        depth_data = torch.where(depth_data < depth_min_z, 2.0, depth_data)
-    return depth_data
+        raise RuntimeError("DAgger requires a depth-enabled student task (Tiled or RayCaster).")
+    depth = env.unwrapped._depth_camera.data.output["distance_to_image_plane"]
+    depth = depth.permute(0, 3, 1, 2).contiguous()
+    processed = preprocess_depth(
+        depth, blur_sigma=args_cli.depth_blur_sigma,
+        additive_noise_std=args_cli.depth_additive_noise_std,
+        dropout_prob=args_cli.depth_dropout_prob, min_z=args_cli.depth_min_z,
+    )
+    env.unwrapped._dagger_processed_depth = processed
+    return processed
 
 
 def _delayed_newest_index(history_index: int, history_length: int) -> int:
     """Index into ``depth_history`` treated as the newest frame fed to the student.
 
     Mirrors the pipeline latency on the real robot: by the time an action is computed for the
-    current state, the depth image available was captured ``--depth_delay_frames`` steps earlier.
+    current state, the depth image available was captured ``--depth_delay_frames`` control steps earlier.
     """
     return (history_index - args_cli.depth_delay_frames) % history_length
 
@@ -357,16 +300,10 @@ def _depth_sequence_from_history(
     newest_index: int,
     env_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    history_length = depth_history.shape[0]
-    ordered_history = torch.cat(
-        (
-            torch.arange(newest_index + 1, history_length, device=depth_history.device),
-            torch.arange(0, newest_index + 1, device=depth_history.device),
-        )
+    return depth_sequence_from_history(
+        depth_history, newest_index, args_cli.depth_history_length, env_indices
     )
-    if env_indices is not None:
-        depth_history = depth_history.index_select(1, env_indices.to(device=depth_history.device))
-    return depth_history.index_select(0, ordered_history).permute(1, 0, 2, 3, 4).contiguous()
+
 
 
 def _sample_env_indices(num_envs: int, max_samples: int | None) -> torch.Tensor | None:
@@ -472,20 +409,21 @@ def _dual_pane_frame(env, env_index=600, depth_range=(0.2, 5.0), student_depth=F
     """Composite a single frame: [left: Isaac Sim view | right: live grayscale depth] for one env.
 
     If ``student_depth`` is True, the right pane shows exactly what the student obs receives
-    (the sanitized depth clipped to [0.1, 2.0], no-hit -> 1.0) instead of the raw camera depth.
+    (the sanitized depth clipped to [0.1, 2.0], invalid/no-hit -> 2.0) instead of the raw camera depth.
     """
     sim_frame = env.unwrapped.render()
     sim_bgr = cv2.cvtColor(sim_frame, cv2.COLOR_RGB2BGR)
     if student_depth:
-        # Student obs input: _sanitize_depth_data clips to [0.1, 2.0], no-hit -> 1.0.
-        d = _sanitize_depth_data(env)[env_index, 0].float()
+        # Student obs input: _sanitize_depth_data clips to [0.1, 2.0], invalid/no-hit -> 2.0.
+        # Reuse the captured frame; a preview must not sample fresh sensor noise.
+        d = env.unwrapped._dagger_processed_depth[env_index, 0].float()
         d = (d - 0.1) / (2.0 - 0.1)
     else:
         raw = env.unwrapped._depth_camera.data.output["distance_to_image_plane"]
         d = raw[env_index, ..., 0].float()
         d = torch.nan_to_num(d, nan=float("inf"), posinf=float("inf"), neginf=float("inf"))
         d = (d - depth_range[0]) / (depth_range[1] - depth_range[0])
-    d = torch.clamp(d, 0.0, 1.0)  # no-hit -> 1.0 -> black
+    d = torch.clamp(d, 0.0, 1.0)  # invalid/no-hit -> 2.0 -> black
     gray = (255.0 * (1.0 - d)).to(torch.uint8).cpu().numpy()  # near = bright, far = dark
     depth_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
     h, w = sim_bgr.shape[:2]
@@ -534,6 +472,10 @@ def _check_student_ckpt_compat(ckpt: dict, net: torch.nn.Module, depth_image_hw:
             + ". Cannot load a policy trained at a different resolution/size."
         )
     meta = ckpt.get("metadata", {})
+    if meta.get("depth_pipeline_version", 1) != PIPELINE_VERSION:
+        print("[WARN] Student checkpoint uses an older depth pipeline; capture timing or delay units changed.")
+    if "depth_fps" in meta and meta["depth_fps"] != args_cli.depth_fps:
+        print(f"[WARN] Checkpoint depth_fps={meta['depth_fps']} differs from current {args_cli.depth_fps}.")
     if "depth_image_size" in meta and tuple(meta["depth_image_size"]) != tuple(depth_image_hw):
         print(
             f"[WARN] --eval_policy metadata depth_image_size={meta['depth_image_size']} != live env "
@@ -609,8 +551,9 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
         _install_fixed_command(env)
     follow_env = _effective_follow_env(args_cli.follow_env, num_envs, has_fixed_cmd=args_cli.cmd is not None)
 
-    depth_history = current_depth_cpu.unsqueeze(0).repeat(args_cli.depth_history_length, 1, 1, 1, 1).contiguous()
-    history_index = args_cli.depth_history_length - 1
+    history_capacity = args_cli.depth_history_length + args_cli.depth_delay_frames
+    depth_history = current_depth_cpu.unsqueeze(0).repeat(history_capacity, 1, 1, 1, 1).contiguous()
+    history_index = history_capacity - 1
 
     dagger_net = DaggerNet(
         vec_size=common_obs_size,
@@ -644,7 +587,7 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
     while simulation_app.is_running() and (max_steps is None or step < max_steps):
         start_time = time.time()
         common_obs = obs["common"]
-        newest_index = _delayed_newest_index(history_index, args_cli.depth_history_length)
+        newest_index = _delayed_newest_index(history_index, history_capacity)
 
         # All envs are controlled by the student (env_indices_cpu=None) -- the same code path as
         # the training loop's beta<=0 branch (training L715-724).
@@ -659,13 +602,13 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
 
         obs, _, dones, _ = env.step(student_actions)
         dones_cpu = dones.bool().to(device="cpu")
+        # Match the original DAgger: read sensor data and append a snapshot each control step.
         current_depth_cpu = _sanitize_depth_data(env).detach().to(device="cpu", dtype=torch.float16)
-
-        history_index = (history_index + 1) % args_cli.depth_history_length
+        history_index = (history_index + 1) % history_capacity
         depth_history[history_index].copy_(current_depth_cpu)
         if dones_cpu.any():
             depth_history[:, dones_cpu] = current_depth_cpu[dones_cpu].unsqueeze(0).expand(
-                args_cli.depth_history_length, -1, -1, -1, -1
+                history_capacity, -1, -1, -1, -1
             )
 
         # Camera follow -- mirrors training loop (keep in sync).
@@ -732,8 +675,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         raise ValueError("--depth_history_length must be positive.")
     if args_cli.depth_delay_frames < 0:
         raise ValueError("--depth_delay_frames must be non-negative.")
-    if args_cli.depth_delay_frames >= args_cli.depth_history_length:
-        raise ValueError("--depth_delay_frames must be smaller than --depth_history_length.")
+    if not math.isfinite(args_cli.depth_min_z) or not 0.0 <= args_cli.depth_min_z <= 2.0:
+        raise ValueError("--depth_min_z must be finite and in [0, 2] metres.")
+    if not getattr(env_cfg, "emit_teacher_obs", False) or getattr(env_cfg, "use_lin_vel_obs", True):
+        raise ValueError("Use Locomotion-Go1-Rough-Vision-Tiled or -RayCaster for DAgger.")
     if args_cli.depth_blur_sigma < 0:
         raise ValueError("--depth_blur_sigma must be non-negative.")
     if args_cli.depth_additive_noise_std < 0:
@@ -759,6 +704,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.use_depth_camera = True
     # keep the depth camera's red raycast markers out of the recorded viewport
     env_cfg.depth_camera.debug_vis = False
+    if not math.isfinite(args_cli.depth_fps) or args_cli.depth_fps <= 0:
+        raise ValueError("--depth_fps must be finite and positive.")
+    env_cfg.depth_camera.update_period = 1.0 / args_cli.depth_fps
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
@@ -858,8 +806,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     depth_channels = current_depth_cpu.shape[1]
     device = env.unwrapped.device
 
-    depth_history = current_depth_cpu.unsqueeze(0).repeat(args_cli.depth_history_length, 1, 1, 1, 1).contiguous()
-    history_index = args_cli.depth_history_length - 1
+    history_capacity = args_cli.depth_history_length + args_cli.depth_delay_frames
+    depth_history = current_depth_cpu.unsqueeze(0).repeat(history_capacity, 1, 1, 1, 1).contiguous()
+    history_index = history_capacity - 1
 
     dagger_net = DaggerNet(
         vec_size=common_obs_size,
@@ -883,6 +832,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "robot_obs_key": "common",
         "depth_history_length": args_cli.depth_history_length,
         "depth_history_storage": "cpu_float16",
+        "depth_pipeline_version": PIPELINE_VERSION,
+        "depth_fps": args_cli.depth_fps,
+        "depth_delay_units": "control_steps",
+        "depth_history_update_rate": 1.0 / env.unwrapped.step_dt,
+        "depth_source_resolution": (480, 848),
+        "depth_calibration_status": "nominal_unverified",
+        "depth_mount_reference": {
+            "bottom_screw_position_base": D435_BOTTOM_SCREW_POSITION_BASE,
+            "bottom_screw_pitch_deg": D435_MOUNT_PITCH_DEG,
+            "depth_origin_in_screw": D435_DEPTH_ORIGIN_IN_SCREW,
+            "source": "RealSense official _d435.urdf.xacro",
+        },
+        "depth_min_z": args_cli.depth_min_z,
+        "depth_camera": {
+            "intrinsics": env.unwrapped._depth_camera.data.intrinsic_matrices[0].cpu().tolist(),
+            "position_base": tuple(env_cfg.depth_camera.offset.pos),
+            "quaternion_wxyz": tuple(env_cfg.depth_camera.offset.rot),
+            "convention": env_cfg.depth_camera.offset.convention,
+            "update_period": env_cfg.depth_camera.update_period,
+            "sensor_update_period": env_cfg.depth_camera.update_period,
+            "history_sampling": "every_control_step",
+            "control_period": env.unwrapped.step_dt,
+            "depth_type": "distance_to_image_plane",
+        },
         "depth_delay_frames": args_cli.depth_delay_frames,
         "depth_sensor_noise": {
             "blur_sigma": args_cli.depth_blur_sigma,
@@ -902,7 +875,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(
         "[INFO] Starting online DAgger training "
         f"(num_envs={num_envs}, depth_history={args_cli.depth_history_length}, "
-        f"depth_delay={args_cli.depth_delay_frames} step(s), depth_blur_sigma={args_cli.depth_blur_sigma}, "
+        f"depth_fps={args_cli.depth_fps}, depth_delay={args_cli.depth_delay_frames} control step(s), depth_blur_sigma={args_cli.depth_blur_sigma}, "
         f"depth_additive_std={args_cli.depth_additive_noise_std}, depth_dropout={args_cli.depth_dropout_prob}, "
         f"buffer={args_cli.dagger_buffer_size}, batch={args_cli.dagger_batch_size}, "
         f"train_micro_batch={args_cli.dagger_train_micro_batch_size}, "
@@ -927,6 +900,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if not os.path.exists(resume_ckpt_path):
             raise FileNotFoundError(f"--resume_from path not found: {resume_ckpt_path}")
         ckpt = torch.load(resume_ckpt_path, map_location=device, weights_only=False)
+        _check_student_ckpt_compat(ckpt, dagger_net, tuple(current_depth_cpu.shape[-2:]))
         dagger_net.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         step = int(ckpt["step"])
@@ -941,7 +915,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     ):
         common_obs = obs["common"]
         # feed the student depth delayed by --depth_delay_frames (capture->inference latency)
-        newest_index = _delayed_newest_index(history_index, args_cli.depth_history_length)
+        newest_index = _delayed_newest_index(history_index, history_capacity)
 
         dagger_net.eval()
         with torch.inference_mode():
@@ -1002,13 +976,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         obs, _, dones, _ = env.step(actions)
         dones_cpu = dones.bool().to(device="cpu")
+        # Match the original DAgger: read sensor data and append a snapshot each control step.
         current_depth_cpu = _sanitize_depth_data(env).detach().to(device="cpu", dtype=torch.float16)
-
-        history_index = (history_index + 1) % args_cli.depth_history_length
+        history_index = (history_index + 1) % history_capacity
         depth_history[history_index].copy_(current_depth_cpu)
         if dones_cpu.any():
             depth_history[:, dones_cpu] = current_depth_cpu[dones_cpu].unsqueeze(0).expand(
-                args_cli.depth_history_length, -1, -1, -1, -1
+                history_capacity, -1, -1, -1, -1
             )
 
         # follow a walking env (>=500) so recorded videos show the robot moving

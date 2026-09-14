@@ -23,6 +23,9 @@ from isaaclab.sensors import ImuCfg
 from isaaclab.utils import configclass
 
 from basic_locomotion_isaaclab.assets.go1_asset import GO1_CFG, GO1_FEETONLY_CFG
+from basic_locomotion_isaaclab.assets.d435_geometry import (
+    D435_DEPTH_POSITION_BASE, D435_DEPTH_QUATERNION_ROS_WXYZ,
+)
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
 
 import basic_locomotion_isaaclab.tasks.custom_events as custom_events
@@ -730,7 +733,8 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
     """GO1 DAgger student env: TiledCamera depth, no base_lin_vel obs, teacher_obs emitted.
 
     Replaces the raycast depth with a GPU-rendered TiledCamera mounted at the URDF d435
-    pose (d435_bottom_screw_frame), so the student sees depth like the real D435. The
+    depth optical pose composed from the bottom-screw mount, so the student
+    sees depth from the nominal D435 depth origin. The
     student obs ("common") excludes base_lin_vel (not available on the real robot); the
     privileged teacher obs ("teacher_obs") carries the sim base_lin_vel + heightmap so the
     expert can label student states during DAgger. Requires --enable_cameras at launch.
@@ -827,14 +831,13 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
     use_depth_camera = True
     visualize_camera_mount = False
     depth_camera = TiledCameraCfg(
-        # Mount on base with the URDF d435_joint pose (0.23, 0, 0.10, 30 deg down).
-        # The d435 link cannot survive the fixed-joint merge (absorbed into trunk), so
-        # the camera pose is replicated via this offset instead of a dedicated link.
+        # Compose the user bottom-screw mount (0.26, 0, 0.12), Ry(30 deg),
+        # with the nominal D435 screw-to-depth-origin transform.
         prim_path="/World/envs/env_.*/Robot/base/d435",
-        update_period=1 / 60,
+        update_period=1 / 30,
         offset=TiledCameraCfg.OffsetCfg(
-            pos=(0.26, 0.0, 0.12),  # URDF d435_joint mount
-            rot=(-0.353553, 0.612372, -0.612372, 0.353553),  # 30 deg down + upright image (w,x,y,z)
+            pos=D435_DEPTH_POSITION_BASE,
+            rot=D435_DEPTH_QUATERNION_ROS_WXYZ,  # already includes body-to-optical rotation
             convention="ros",
         ),
         spawn=sim_utils.PinholeCameraCfg(
@@ -878,13 +881,12 @@ class Go1RoughVisionRayCasterEnvCfg(Go1RoughVisionEnvCfg):
     use_depth_camera = True
     visualize_camera_mount = False
     depth_camera = MultiMeshRayCasterCameraCfg(
-        # Mount on base with the same URDF d435_joint pose as the Tiled student so the two
-        # students see an identical view (87 deg / 106x60 = D435 848x480 / 8, same aspect).
+        # Same composed bottom-screw-to-depth-origin transform as the Tiled student.
         prim_path="/World/envs/env_.*/Robot/base",
-        update_period=1 / 60,
+        update_period=1 / 30,
         offset=MultiMeshRayCasterCameraCfg.OffsetCfg(
-            pos=(0.26, 0.0, 0.12),
-            rot=(-0.353553, 0.612372, -0.612372, 0.353553),  # 30 deg down + upright image (w,x,y,z)
+            pos=D435_DEPTH_POSITION_BASE,
+            rot=D435_DEPTH_QUATERNION_ROS_WXYZ,  # already includes body-to-optical rotation
             convention="ros",
         ),
         mesh_prim_paths=[

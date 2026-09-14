@@ -30,7 +30,6 @@ import numpy as np
 import mujoco
 import mujoco.viewer  # imports fine headless; only window creation needs a display
 import torch
-import torch.nn.functional as F
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.join(os.path.dirname(HERE), "..")
@@ -38,6 +37,10 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(REPO, "scripts", "dagger"))
 from mujoco_depth import MujocoDepthCamera
 from dagger_network import DaggerNet
+from depth_pipeline import preprocess_depth
+sys.path.insert(0, os.path.join(REPO, "source", "basic_locomotion_isaaclab",
+                              "basic_locomotion_isaaclab", "assets"))
+from d435_geometry import D435_DEPTH_POSITION_BASE, D435_MOUNT_PITCH_DEG
 
 GO1_XML = os.path.join(REPO, "deploy", "mujoco_models", "go1", "go1.xml")
 
@@ -55,8 +58,8 @@ GO1_DEFAULTS = dict(action_scale=0.5, clip_actions=3.0, use_filter=True,
                     step_freq=1.4, sim_dt=0.005, decimation=4, history_length=5)
 
 # MuJoCo camera geometry baked into the scene XML (training D435-equivalent).
-CAM_POS = (0.26, 0.0, 0.12)   # in trunk frame
-CAM_PITCH_DEG = 30.0
+CAM_POS = D435_DEPTH_POSITION_BASE   # depth origin in trunk/base frame
+CAM_PITCH_DEG = D435_MOUNT_PITCH_DEG
 # Training renders at 106x60 (D435 848x480 / 8, aspect 1.7667) with HFOV 87 deg, so the
 # vertical FOV is 2*atan(tan(43.5 deg) * 60/106) ~ 56.5 deg. MuJoCo cameras specify fovy
 # (vertical), which reproduces the same projection at 106x60.
@@ -127,10 +130,11 @@ def _camera_quat():
 
 
 def build_go1_scene_xml(scene="flat", step_rise=0.12, step_tread=0.30, n_steps=12,
-                        width=6.0, perlin_amp=0.18, kp=30.0):
+                        width=6.0, perlin_amp=0.18, kp=30.0,
+                        camera_position=CAM_POS, camera_quaternion=None):
     """Compose a scene XML: go1 robot + terrain + baked depth camera."""
     inner = _go1_xml_inner(kp=kp)
-    cam_q = " ".join(f"{v:.6f}" for v in _camera_quat())
+    cam_q = " ".join(f"{v:.6f}" for v in (_camera_quat() if camera_quaternion is None else camera_quaternion))
 
     assets = (
         '<texture type="2d" name="groundplane" builtin="checker" mark="edge" '
@@ -219,7 +223,7 @@ def build_go1_scene_xml(scene="flat", step_rise=0.12, step_tread=0.30, n_steps=1
     # bake the depth camera into the XML as the FIRST child of the trunk body so its
     # pose (0.26, 0, 0.12) is in the trunk frame and it tracks the robot (a camera at
     # worldbody level would not follow the trunk).
-    camera = f'<camera name="depth_cam" pos="{CAM_POS[0]} {CAM_POS[1]} {CAM_POS[2]}" quat="{cam_q}" fovy="{CAM_FOVY}"/>\n'
+    camera = f'<camera name="depth_cam" pos="{camera_position[0]} {camera_position[1]} {camera_position[2]}" quat="{cam_q}" fovy="{CAM_FOVY}"/>\n'
     inner = inner.replace("<worldbody>", "<worldbody>\n" + geoms)
     inner = inner.replace("<asset>", "<asset>\n" + assets)
     trunk_open = '<body name="trunk"'
@@ -269,41 +273,13 @@ def _make_key_callback(ctl):
 
 # --- depth preprocessing (mirrors training _sanitize_depth_data) ------------
 
-_gauss_cache = {}
-
-
-def _gaussian_kernel(kernel_size, sigma, device):
-    key = (kernel_size, sigma)
-    if key in _gauss_cache:
-        return _gauss_cache[key].to(device)
-    coords = torch.arange(kernel_size, dtype=torch.float32) - (kernel_size - 1) / 2
-    g = torch.exp(-(coords**2) / (2 * sigma**2))
-    g = g / g.sum()
-    k = (g[:, None] * g[None, :]).view(1, 1, kernel_size, kernel_size)
-    _gauss_cache[key] = k
-    return k.to(device)
-
-
-def _blur_depth(depth, sigma):
-    """Gaussian blur with replicate padding (matches training blur stage)."""
-    if sigma <= 0:
-        return depth
-    kernel_size = max(3, int(2 * math.ceil(2 * sigma) + 1))
-    k = _gaussian_kernel(kernel_size, sigma, depth.device)
-    pad = kernel_size // 2
-    depth = F.pad(depth, (pad, pad, pad, pad), mode="replicate")
-    return F.conv2d(depth, k)
-
-
-def _preprocess_depth(depth, blur_sigma, device):
-    """Raw MuJoCo depth (H,W) -> (1,1,H,W) training sanitized depth [0.1, 2.0]."""
-    d = np.asarray(depth, dtype=np.float32)
-    d[d > 3.0] = np.inf          # no-hit / beyond far -> far
-    d[d < 0.01] = np.inf         # below training near clip -> far
-    d = np.nan_to_num(d, nan=0.0, posinf=3.0, neginf=-1.0)
-    d = np.clip(d, 0.1, 2.0)
-    t = torch.from_numpy(d)[None, None].to(device)   # (1,1,H,W)
-    return _blur_depth(t, blur_sigma)
+def _preprocess_depth(depth, blur_sigma, device, *, min_z=0.0,
+                      additive_noise_std=0.0, dropout_prob=0.0):
+    d = np.array(depth, dtype=np.float32, copy=True)
+    d[d < 0.01] = 0.0
+    t = torch.from_numpy(d)[None, None].to(device)
+    return preprocess_depth(t, blur_sigma=blur_sigma, min_z=min_z,
+                            additive_noise_std=additive_noise_std, dropout_prob=dropout_prob)
 
 
 def main():
@@ -369,22 +345,37 @@ def main():
     net.load_state_dict(ckpt["model_state_dict"])
     net.eval()
     depth_len = int(md["depth_history_length"])
+    depth_fps = float(md.get("depth_fps", rl_freq))
+    if md.get("depth_delay_units") == "camera_frames":
+        print("[WARN] This student used camera-frame history; current sim2sim uses control-step history.")
     blur_sigma = float(md.get("depth_sensor_noise", {}).get("blur_sigma", 0.0))
     delay = int(md.get("depth_delay_frames", 0))
     print(f"[INFO] rl_freq={rl_freq:.1f} obs={md['common_obs_size']} depth_len={depth_len} "
-          f"blur_sigma={blur_sigma} delay={delay}")
+          f"depth_fps={depth_fps} blur_sigma={blur_sigma} delay={delay} history step(s)")
 
+    # Use saved optical pose; older students without pose metadata used the screw origin.
+    camera_meta = md.get("depth_camera", {})
+    camera_position = camera_meta.get("position_base", (0.26, 0.0, 0.12))
+    camera_quaternion = None
+    if "quaternion_wxyz" in camera_meta:
+        if camera_meta.get("convention") != "ros":
+            raise ValueError("Saved camera pose must use ROS optical convention.")
+        w, x, y, z = camera_meta["quaternion_wxyz"]
+        # ROS -> OpenGL camera axes: postmultiply by Rx(pi).
+        camera_quaternion = (-x, w, z, -y)
     # --- build + load the scene (go1 + terrain + depth cam) ---
     xml = build_go1_scene_xml(scene=args.scene, step_rise=args.step_rise, step_tread=args.step_tread,
                               n_steps=args.n_steps, width=args.stair_width, perlin_amp=args.perlin_amp,
-                              kp=args.kp)
+                              kp=args.kp, camera_position=camera_position,
+                              camera_quaternion=camera_quaternion)
     model = mujoco.MjModel.from_xml_string(xml)
     # align physics timestep with training (sim.dt = 0.005)
     model.opt.timestep = TRAIN_DT
     data = mujoco.MjData(model)
     depth_cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "depth_cam")
     assert depth_cam_id >= 0, "depth_cam camera missing from scene XML"
-    cam = MujocoDepthCamera(model, data, depth_cam_id, width=DEPTH_W, height=DEPTH_H)
+    cam = MujocoDepthCamera(model, data, depth_cam_id, width=DEPTH_W, height=DEPTH_H,
+                            update_period=1.0 / depth_fps)
 
     # --- actuator -> policy-joint mapping (per-leg actuators vs hip/thigh/calf blocks) ---
     # go1.xml actuator names are "{joint}" (e.g. "FR_hip" controls "FR_hip_joint").
@@ -496,10 +487,18 @@ def main():
         obs_hist = np.roll(obs_hist, -1, axis=0)
         obs_hist[-1] = obs1
 
-        depth_t = _preprocess_depth(cam.render(), blur_sigma, device)   # (1,1,H,W)
-        hist = np.roll(hist, -1, axis=0)
-        hist[-1] = depth_t.squeeze(0).squeeze(0).numpy().astype(np.float16)
-        # depth delay: feed the sequence ending `delay` steps earlier (matches training)
+        depth_t = _preprocess_depth(
+            cam.render(), blur_sigma, device, min_z=float(md.get("depth_min_z", 0.0)),
+            additive_noise_std=float(md.get("depth_sensor_noise", {}).get("additive_noise_std", 0.0)),
+            dropout_prob=float(md.get("depth_sensor_noise", {}).get("dropout_prob", 0.0)),
+        )
+        frame = depth_t.squeeze(0).squeeze(0).numpy().astype(np.float16)
+        if p == 0:
+            hist[:] = frame
+        else:
+            hist = np.roll(hist, -1, axis=0)
+            hist[-1] = frame
+        # Match control-step history sampling and delay in the original DAgger.
         if delay > 0:
             seq = hist[-depth_len - delay:-delay]
         else:

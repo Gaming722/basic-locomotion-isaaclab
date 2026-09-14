@@ -8,7 +8,7 @@ Distills the GO1 **heightmap-based** teacher (`Locomotion-Go1-Rough-Vision`) int
 - `Locomotion-Go1-Rough-Vision-RayCaster` — Warp `MultiMeshRayCasterCamera` depth
   (no renderer, cheaper, inherently never sees neighbouring envs).
 
-The teacher reads `obs["teacher_obs"]` (sim base_lin_vel + heightmap, 323 dims); the
+The teacher reads `obs["teacher_obs"]` (sim base_lin_vel + heightmap, 303 dims); the
 student reads `obs["common"]` (no velocity) + the depth image.
 
 ## 1. Train the teacher
@@ -55,8 +55,8 @@ python scripts/dagger/train_dagger_go1.py \
 - **`--headless` is required** on a no-display server. The script uses
   `AppLauncher(args_cli)`, so `headless` comes from this CLI flag — without it the
   rendering kit tries to open a window and hangs.
-- **`--num_envs` must be > 500**: envs 0-499 are command-zero (stand still); only
-  envs 500+ actually move. `--follow_env` defaults to 600 to follow a moving robot.
+- **When `--num_envs` > 500**, envs 0-499 are command-zero (stand still); only
+  envs 500+ move. With <=500 envs, this fixed-standing group is disabled. `--follow_env` defaults to 600 to follow a moving robot.
   The Tiled terrain is 46x46 sub-terrains (max 2116 envs).
 - The TiledCamera student env requires the rendering kit; the script forces
   `--enable_cameras`.
@@ -104,7 +104,7 @@ By default the student depth is passed through a small D435-like sensor model (i
 - `--depth_dropout_prob` (default `0.0`): probability of dropping a pixel to the
   far-saturation code `2.0` (simulates D435 holes / invalid depth).
 - `--depth_delay_frames` (default `1`): delays the depth fed to the student by N
-  env steps, modelling capture→inference latency. Must be `< --depth_history_length`.
+  control steps, modelling capture→inference latency. Additional buffer slots preserve the full history.
 
 Processing order: blur (replicate padding, no border artifact) → additive noise →
 re-clip to `[0.1, 2.0]` → dropout holes → `depth_min_z` mask. Keep these knobs in
@@ -125,8 +125,8 @@ The camera config is **unchanged** (`clipping_range=(0.01, 3.0)`,
 | sub-`depth_min_z` (if enabled) | real depth | `2.0` |
 
 **Resolution contract:** both student cameras now render depth at **native 106×60** —
-exactly 1/8 of the D435 848×480 frame (aspect 1.7667), so at 87° HFOV the vertical FOV
-(~56.5°) and the per-pixel angular mapping match the real frame 1:1. The on-robot
+1/8 of an 848×480 frame (aspect 1.7667), with a nominal 87° HFOV and
+~56.5° VFOV. This is an ideal pinhole approximation, not a measured calibration. The on-robot
 preprocessing must therefore downscale the real depth to 106×60 (e.g. an 8×
 area-average / `cv2.INTER_AREA`), not 240×140. Dagger checkpoints trained at the old
 240×140 are incompatible with a 106×60-trained student — retrain after this change.
@@ -236,3 +236,117 @@ python scripts/dagger/train_dagger_go1.py \
 - A checkpoint trained at a different obs/action/depth shape is rejected with a clear error;
   a metadata mismatch (`depth_image_size`, `depth_history_length`, `depth_delay_frames`) that
   still loads warns about an input-distribution shift.
+
+
+### Corrected depth encoding and history (introduced in version 2)
+
+Training, evaluation and MuJoCo use `depth_pipeline.py`: metric optical-axis
+Z depth, invalid/nonpositive/at-or-beyond-3 m pixels -> 2 m, clip [0.1, 2],
+blur -> measurement noise -> clip -> dropout. Original invalid pixels retain
+2 m after filtering. `--depth_min_z` (metres, default 0/off) masks measured
+near-invalid pixels before filtering and again after noise.
+
+A length H sequence with delay D uses a ring buffer of H+D frames. It feeds
+[t-D-H+1, ..., t-D], never the newer D frames. Reset fills all H+D slots with
+the new episode frame. Old students with nonzero delay were trained with a
+wrapped, nonchronological sequence; retraining is preferred. The teacher PPO
+checkpoint is unaffected. New checkpoints record `depth_pipeline_version`,
+`depth_min_z`, actual camera intrinsics, base-relative mount and frame periods.
+
+### Real-camera calibration and measured noise
+
+Before claiming sim-to-real alignment, collect:
+
+- Actual depth stream resolution and fx/fy/cx/cy, distortion/rectification status,
+  depth units, and whether depth is aligned to the colour camera.
+- Base-to-depth-optical-centre position and quaternion, with coordinate convention.
+  Bottom-screw mount (0.26, 0, 0.12), ROS optical wxyz quaternion
+  (-0.353553, 0.612372, -0.612372, 0.353553), uses the official nominal screw-to-depth-origin offset; the installation is not calibrated.
+- Crop origin/size, resize method and final 106x60 intrinsics. Transform the
+  calibrated intrinsics with the same crop/resize; matching nominal FOV alone
+  does not establish alignment. Native low-resolution rendering plus blur only
+  approximates high-resolution area downsampling at occlusion edges.
+- Frame timestamps/rate and capture-to-policy latency. Student consumption is
+  50 Hz; `depth_delay_frames` now counts control steps, not captured camera frames.
+- Depth error and invalid-pixel fraction on static planes at several distances;
+  measure proprioceptive bias/noise separately. Do not add noise to teacher labels.
+
+Until these measurements are available, additive noise and dropout remain off;
+blur sigma 0.5 is a nominal approximation. Use measured values with
+`--depth_additive_noise_std`, `--depth_dropout_prob`, `--depth_min_z` and
+`--depth_delay_frames`. Constant Gaussian noise and independent dropout are
+simplified models and do not represent distance-dependent or spatially correlated
+stereo errors. MuJoCo reads these depth settings from student metadata.
+
+Run CPU regression checks without Isaac Sim:
+
+```bash
+python -m unittest discover -s scripts/dagger/tests -v
+```
+
+
+### D435 nominal 30 Hz sensor with original DAgger history (version 4)
+
+`--depth_fps 30` sets the IsaacLab camera `update_period=1/30` directly.
+There is no custom capture clock and no override to update_period=0.
+Like the original `train_dagger.py`, every 50 Hz control step reads the camera
+buffer, preprocesses it, and appends a depth snapshot to history. Cached raw
+frames may repeat; configured random noise is applied to each read.
+
+Five history entries span four control intervals, approximately 80 ms, not
+133 ms. `--depth_delay_frames` counts control-step history entries: 1 is
+20 ms, and the default is 1 control step (20 ms at 50 Hz).
+The H+D buffer and chronological sequence fix remain in place.
+
+IsaacLab owns sensor refresh. With lazy reads at 20 ms intervals, a 33.3 ms
+sensor period can yield a new image every 40 ms (approximately 25 Hz), rather
+than strict hardware 30 FPS. The nominal period does not guarantee an independent
+30 FPS capture thread. This approximation is retained to follow the original
+DAgger handling. MuJoCo reads every control step and caches raw depth according
+to the saved sensor period, matching the same lazy-refresh convention.
+
+Version-3 students used captured-frame history/delay with a custom capture clock;
+version-4 uses control-step history/delay. Evaluation/resume warns about changed
+pipeline versions; retraining students is preferred. The teacher is unaffected.
+
+The hardware source is planned as 848x480; simulator rendering remains native
+106x60 for efficiency. Source resolution is recorded as planned metadata, not
+proof of calibrated projection or high-resolution downsampling equivalence.
+No crop or colour alignment is assumed. Read real intrinsics/depth scale from
+the active depth stream once hardware is available, then measure the mount pose
+and noise before changing the nominal geometry or enabling random noise.
+
+Example with the existing teacher:
+
+```bash
+python scripts/dagger/train_dagger_go1.py \
+  --task Locomotion-Go1-Rough-Vision-Tiled \
+  --checkpoint logs/rsl_rl/rough_direct/2026-09-09_01-41-12/model_96950.pt \
+  --num_envs 1024 --headless \
+  --depth_fps 30 --depth_history_length 5 --depth_delay_frames 1
+```
+
+
+### D435 bottom-screw versus depth optical origin
+
+The user mount position `(0.26, 0, 0.12)` is the **bottom screw**, with
+body axes X forward/Y left/Z up and Ry(+30 deg) mounting pitch. It is not
+the depth optical origin. The official nominal model gives screw-to-depth
+translation `(0.0106, 0.0175, 0.0125)` m: forward offset is
+`0.0149 - 0.0001 - 0.0042`, including front-glass/zero-depth-reference corrections.
+The depth frame coincides nominally with the left IR frame, not RGB or case centre.
+
+Compose `p_base_depth = p_base_screw + R_base_screw * p_screw_depth`.
+This gives `(0.27542987, 0.0175, 0.12552532)` m. The existing ROS optical
+quaternion already contains the 30-degree mounting pitch and body-to-optical
+axis rotation, so its orientation is retained. Do not rotate the translation
+using the ROS optical quaternion: the local offset above uses screw body axes.
+
+Both student camera configurations share `assets/d435_geometry.py`.
+MuJoCo uses the optical pose saved in student metadata; older checkpoints
+without pose metadata retain their previous screw-origin pose. New students
+should be trained with the corrected geometry. The teacher heightmap checkpoint
+is unaffected. This is a nominal manufacturer-model correction, not a substitute
+for measuring the actual robot installation or per-device calibration.
+
+Source: [RealSense official D435 model](https://github.com/realsenseai/realsense-ros/blob/ros2-master/realsense2_description/urdf/_d435.urdf.xacro).
