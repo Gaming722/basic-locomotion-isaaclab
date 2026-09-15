@@ -90,6 +90,12 @@ below). If no `--checkpoint`/`--load_run` is given, the script auto-selects the
 - `--dual_pane_student_depth`: the right dual-pane shows the **student actor's
   sanitized depth** (nan_to_num + clip [0.1, 2.0] + depth_min_z mask) instead of the
   raw camera depth — i.e. exactly what feeds the student GRU.
+- DAgger defaults are tuned for the 1024-env GO1 RayCaster workload:
+  `--dagger_buffer_size 8192`, `--dagger_samples_per_step 32`,
+  `--dagger_batch_size 128`, `--dagger_train_micro_batch_size 64`, and
+  `--dagger_inference_batch_size 128`. With the default `--dagger_train_every 4`
+  and `--dagger_updates_per_train 1`, the replay ratio is 1.0 and the full buffer
+  spans 256 control steps. Teacher action mixing decays over 20000 steps by default.
 
 ### Depth sensor simulation (noise + latency)
 

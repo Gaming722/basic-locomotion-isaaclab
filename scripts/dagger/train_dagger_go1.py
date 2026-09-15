@@ -101,26 +101,26 @@ parser.add_argument(
 parser.add_argument(
     "--dagger_buffer_size",
     type=int,
-    default=2048,
+    default=8192,
     help="Maximum number of aggregated in-memory DAgger samples.",
 )
 parser.add_argument(
     "--dagger_samples_per_step",
     type=int,
-    default=64,
+    default=32,
     help="Maximum number of environments added to the DAgger buffer per simulator step.",
 )
-parser.add_argument("--dagger_batch_size", type=int, default=64, help="Total batch size sampled from the CPU buffer.")
+parser.add_argument("--dagger_batch_size", type=int, default=128, help="Total batch size sampled from the CPU buffer.")
 parser.add_argument(
     "--dagger_train_micro_batch_size",
     type=int,
-    default=16,
+    default=64,
     help="GPU micro-batch size for each behavior-cloning update.",
 )
 parser.add_argument(
     "--dagger_inference_batch_size",
     type=int,
-    default=32,
+    default=128,
     help="Maximum number of student-controlled environments evaluated on GPU at once.",
 )
 parser.add_argument("--dagger_learning_rate", type=float, default=3e-4, help="Student optimizer learning rate.")
@@ -163,7 +163,7 @@ parser.add_argument(
 parser.add_argument(
     "--expert_beta_decay_steps",
     type=int,
-    default=10000,
+    default=20000,
     help="Number of simulator steps used to linearly decay teacher action mixing.",
 )
 parser.add_argument(
