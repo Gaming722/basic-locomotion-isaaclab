@@ -55,9 +55,10 @@ python scripts/dagger/train_dagger_go1.py \
 - **`--headless` is required** on a no-display server. The script uses
   `AppLauncher(args_cli)`, so `headless` comes from this CLI flag — without it the
   rendering kit tries to open a window and hangs.
-- **When `--num_envs` > 500**, envs 0-499 are command-zero (stand still); only
-  envs 500+ move. With <=500 envs, this fixed-standing group is disabled. `--follow_env` defaults to 600 to follow a moving robot.
-  The Tiled terrain is 46x46 sub-terrains (max 2116 envs).
+- The DAgger student keeps the teacher's standing-command ratio: `500/4096`
+  (about 12.2%) of the leading envs receive a zero command. With 1024 envs this
+  means envs 0-124 stand and envs 125+ move. `--follow_env` is automatically
+  clamped onto a moving env. The Tiled terrain is 46x46 sub-terrains (max 2116 envs).
 - The TiledCamera student env requires the rendering kit; the script forces
   `--enable_cameras`.
 
@@ -81,7 +82,7 @@ below). If no `--checkpoint`/`--load_run` is given, the script auto-selects the
   `<teacher_run>/videos/dagger`). Use a distinct dir per concurrent run so videos
   don't clobber each other.
 - `--video_interval 500`: record videos more often (default 1000 steps).
-- `--follow_env 500`: follow a specific env index (must be >= 500).
+- `--follow_env 500`: follow a specific env index; command-zero indices are skipped automatically.
 - `--terrain <rough|stairs|slope|flat>`: pick the Tiled env terrain. `stairs` and
   `slope` select a single terrain type (handy for recording, e.g. stair climbing).
 - `--difficulty <0.0-1.0>`: pin every sub-terrain to exactly this difficulty
@@ -96,6 +97,9 @@ below). If no `--checkpoint`/`--load_run` is given, the script auto-selects the
   `--dagger_inference_batch_size 128`. With the default `--dagger_train_every 4`
   and `--dagger_updates_per_train 1`, the replay ratio is 1.0 and the full buffer
   spans 256 control steps. Teacher action mixing decays over 20000 steps by default.
+- Both GO1 DAgger student environments sample safer depth-policy commands from
+  `vx in [-0.8, 0.8] m/s`, `vy in [-0.4, 0.4] m/s`, and
+  `yaw in [-0.8, 0.8] rad/s`. The teacher environment keeps its original wider range.
 
 ### Depth sensor simulation (noise + latency)
 
@@ -236,9 +240,9 @@ python scripts/dagger/train_dagger_go1.py \
   Without `--headless` and without a budget it runs until the window is closed.
 - Videos default to `<student_ckpt_dir>/videos/dagger_eval/dual_step-<N>.mp4` (separate from
   training's `videos/dagger` so the two never overwrite `dual_step-0.mp4`).
-- `--follow_env` is auto-clamped onto a moving env: with `--num_envs > 500` and no `--cmd`,
-  envs 0-499 stand still, so it is forced to `>= 500`; with `--cmd` (or `--num_envs <= 500`)
-  every env moves and it may point anywhere.
+- `--follow_env` is auto-clamped onto a moving env. Without `--cmd`, the leading
+  12.2% command-zero envs are skipped; with `--cmd`, every env moves and it may
+  point anywhere.
 - A checkpoint trained at a different obs/action/depth shape is rejected with a clear error;
   a metadata mismatch (`depth_image_size`, `depth_history_length`, `depth_delay_frames`) that
   still loads warns about an input-distribution shift.
@@ -371,7 +375,7 @@ For curriculum terrains, groups use the generator's normalized proportion and
 column assignment. For random non-curriculum terrain generation, exact type is
 not available from the importer; rotation uses columns and logs `column-N`.
 Tiled row-major spacing is handled separately. No terrain or command is changed.
-With >500 envs and random commands, envs 0-499 are excluded because they stand
-still; only terrain groups occupied by moving envs can be covered. A single
+With random commands, the leading 12.2% command-zero envs are excluded; only
+terrain groups occupied by moving envs can be covered. A single
 terrain configuration can vary subject/difficulty but cannot introduce other types.
 Without the flag, video subject stays fixed. Rotation requires dual-pane video.

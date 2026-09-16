@@ -37,7 +37,8 @@ parser.add_argument("--dual_pane", action="store_true", default=False,
 parser.add_argument("--rotate_video_env", action="store_true",
                     help="Rotate followed env across available terrain groups for each dual-pane video clip.")
 parser.add_argument("--follow_env", type=int, default=600,
-                    help="Env index the camera/depth pane follow. GO1 envs 0-499 are command-zero (stand still); follow >=500.")
+                    help="Env index the camera/depth pane follows. It is automatically clamped past the "
+                         "leading command-zero environments.")
 parser.add_argument("--terrain", type=str, default="rough",
                     help="Tiled env terrain: rough | stairs | slope | flat (e.g. --terrain stairs to record stair climbing).")
 parser.add_argument("--difficulty", type=float, default=None,
@@ -267,6 +268,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 from basic_locomotion_isaaclab.assets.d435_geometry import (
     D435_BOTTOM_SCREW_POSITION_BASE, D435_DEPTH_ORIGIN_IN_SCREW, D435_MOUNT_PITCH_DEG,
 )
+from basic_locomotion_isaaclab.tasks.custom_events import get_num_fixed_command_envs
 from dagger_network import DaggerNet, DaggerReplayBuffer
 from depth_pipeline import PIPELINE_VERSION, preprocess_depth, depth_sequence_from_history
 from video_follow import rotating_video_env
@@ -516,24 +518,23 @@ def _install_fixed_command(env) -> None:
         print("[WARN] --cmd ignored: env has no _commands buffer.")
 
 
-def _effective_follow_env(follow_env: int, num_envs: int, has_fixed_cmd: bool) -> int:
+def _effective_follow_env(follow_env: int, env, has_fixed_cmd: bool) -> int:
     """Clamp --follow_env onto an env that is actually moving.
 
-    Envs 0-499 stand still (command zero) whenever num_envs > 500 and no fixed command is set, so
-    --follow_env must point at an env >= 500. With a fixed --cmd every env moves, and with
-    num_envs <= 500 all envs get random commands, so any valid index is fine there.
+    DAgger student envs keep the same standing-env ratio as the teacher regardless
+    of num_envs. With a fixed --cmd every env moves.
     """
-    if num_envs <= 500 or has_fixed_cmd:
-        return max(0, min(follow_env, num_envs - 1))
-    return max(500, min(follow_env, num_envs - 1))
+    num_envs = env.unwrapped.num_envs
+    first_moving_env = 0 if has_fixed_cmd else get_num_fixed_command_envs(env.unwrapped.cfg, num_envs)
+    return max(first_moving_env, min(follow_env, num_envs - 1))
 
 
 def _video_follow_for_clip(env, clip_index):
     terrain = env.unwrapped._terrain
     gen = terrain.cfg.terrain_generator
     num_envs = env.unwrapped.num_envs
-    first_env = 500 if num_envs > 500 and args_cli.cmd is None else 0
-    initial = _effective_follow_env(args_cli.follow_env, num_envs, args_cli.cmd is not None)
+    first_env = 0 if args_cli.cmd is not None else get_num_fixed_command_envs(env.unwrapped.cfg, num_envs)
+    initial = _effective_follow_env(args_cli.follow_env, env, args_cli.cmd is not None)
     if gen is None:
         columns = [0] * num_envs
         proportions = None
@@ -579,7 +580,7 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
     # Patch BEFORE the first step so the very first observation already carries the fixed command.
     if args_cli.cmd:
         _install_fixed_command(env)
-    follow_env = _effective_follow_env(args_cli.follow_env, num_envs, has_fixed_cmd=args_cli.cmd is not None)
+    follow_env = _effective_follow_env(args_cli.follow_env, env, has_fixed_cmd=args_cli.cmd is not None)
 
     history_capacity = args_cli.depth_history_length + args_cli.depth_delay_frames
     depth_history = current_depth_cpu.unsqueeze(0).repeat(history_capacity, 1, 1, 1, 1).contiguous()
@@ -846,6 +847,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     )
     depth_channels = current_depth_cpu.shape[1]
     device = env.unwrapped.device
+    num_fixed_command_envs = get_num_fixed_command_envs(env.unwrapped.cfg, num_envs)
 
     history_capacity = args_cli.depth_history_length + args_cli.depth_delay_frames
     depth_history = current_depth_cpu.unsqueeze(0).repeat(history_capacity, 1, 1, 1, 1).contiguous()
@@ -908,6 +910,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "common_obs_size": common_obs_size,
         "action_size": action_size,
         "num_envs": num_envs,
+        "command_a": tuple(env_cfg.command_a),
+        "fixed_command_zero_ratio": env_cfg.fixed_command_zero_ratio,
+        "num_fixed_command_envs": num_fixed_command_envs,
         "dagger_amp": _use_cuda_amp(device),
         "dagger_train_micro_batch_size": args_cli.dagger_train_micro_batch_size,
         "dagger_inference_batch_size": args_cli.dagger_inference_batch_size,
@@ -920,7 +925,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         f"depth_additive_std={args_cli.depth_additive_noise_std}, depth_dropout={args_cli.depth_dropout_prob}, "
         f"buffer={args_cli.dagger_buffer_size}, batch={args_cli.dagger_batch_size}, "
         f"train_micro_batch={args_cli.dagger_train_micro_batch_size}, "
-        f"inference_batch={args_cli.dagger_inference_batch_size}, amp={_use_cuda_amp(device)})."
+        f"inference_batch={args_cli.dagger_inference_batch_size}, amp={_use_cuda_amp(device)}, "
+        f"command_a={env_cfg.command_a}, fixed_command_envs={num_fixed_command_envs})."
     )
 
     # camera-follow setup for env 0 (video recording view)
@@ -932,7 +938,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dual_writer = None
     dual_frames_left = 0
     video_clip_index = 0
-    follow_env = _effective_follow_env(args_cli.follow_env, num_envs, args_cli.cmd is not None)
+    follow_env = _effective_follow_env(args_cli.follow_env, env, args_cli.cmd is not None)
 
     step = 0
     updates = 0

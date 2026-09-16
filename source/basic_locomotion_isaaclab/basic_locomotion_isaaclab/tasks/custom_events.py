@@ -289,6 +289,21 @@ def _sample_random_commands(self, env_ids: torch.Tensor | None = None) -> torch.
     return commands
 
 
+def get_num_fixed_command_envs(cfg, num_envs: int) -> int:
+    """Return the number of leading envs whose velocity command is held at zero.
+
+    Legacy environments use a fixed count of 500 (and disable it at <=500 envs).
+    DAgger student environments instead set ``fixed_command_zero_ratio`` so their
+    standing/moving command distribution is independent of the parallel env count.
+    """
+    ratio = getattr(cfg, "fixed_command_zero_ratio", None)
+    if ratio is None:
+        return 500 if num_envs > 500 else 0
+    if not 0.0 <= ratio <= 1.0:
+        raise ValueError(f"fixed_command_zero_ratio must be in [0, 1], got {ratio}")
+    return min(num_envs, max(0, round(num_envs * ratio)))
+
+
 def _get_new_random_commands(self, env_ids: torch.Tensor | None = None):
     # mujoco_playground-style command sampling (Go1RoughMjEnvCfg): ~5 s exponential
     # resample + per-axis zeroing rule, replaces the episode-timeline logic below.
@@ -318,9 +333,10 @@ def _get_new_random_commands(self, env_ids: torch.Tensor | None = None):
     commands_resample_2[:, :3] *= _get_command_scale(self)
     self._commands[:, :3] = self._commands[:, :3] * ~resample_time_2.unsqueeze(1).expand(-1, 3) + commands_resample_2 * resample_time_2.unsqueeze(1).expand(-1, 3)
 
-    # Took some envs, and put to zero the vel
-    num_fixed_envs = 500
-    if self.num_envs > num_fixed_envs:
+    # Keep a subset of environments at zero command. DAgger student configs scale
+    # this subset with num_envs to match the teacher's 500/4096 training ratio.
+    num_fixed_envs = get_num_fixed_command_envs(self.cfg, self.num_envs)
+    if num_fixed_envs > 0:
         fixed_env_ids = torch.arange(num_fixed_envs, device=self.device)
         self._commands[fixed_env_ids, :3] *= 0.0
 
