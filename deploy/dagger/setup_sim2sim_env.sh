@@ -13,7 +13,7 @@ set -euo pipefail
 
 ENV_NAME="${1:-sim2sim_go1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GO1_XML="$(cd "$HERE/.." && pwd)/mujoco_models/go1/go1.xml"
+export GO1_XML="$(cd "$HERE/.." && pwd)/mujoco_models/go1/go1.xml"
 
 # Locate conda.
 if [[ -n "${CONDA_EXE:-}" ]]; then

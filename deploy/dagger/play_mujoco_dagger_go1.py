@@ -24,6 +24,8 @@ else:
 import argparse
 import math
 import re
+import time
+import xml.etree.ElementTree as ET
 
 import cv2
 import numpy as np
@@ -40,7 +42,7 @@ from dagger_network import DaggerNet
 from depth_pipeline import preprocess_depth
 sys.path.insert(0, os.path.join(REPO, "source", "basic_locomotion_isaaclab",
                               "basic_locomotion_isaaclab", "assets"))
-from d435_geometry import D435_DEPTH_POSITION_BASE, D435_MOUNT_PITCH_DEG
+from d435_geometry import D435_DEPTH_POSITION_BASE, D435_MOUNT_PITCH_DEG, D435_DEPTH_QUATERNION_ROS_WXYZ
 
 GO1_XML = os.path.join(REPO, "deploy", "mujoco_models", "go1", "go1.xml")
 
@@ -55,7 +57,8 @@ DEFAULT_JOINT = np.array([0.0] * 4 + [0.9] * 4 + [-1.8] * 4)  # GO1 home pose
 
 # GO1 training defaults (fallback if params/env.yaml is missing).
 GO1_DEFAULTS = dict(action_scale=0.5, clip_actions=3.0, use_filter=True,
-                    step_freq=1.4, sim_dt=0.005, decimation=4, history_length=5)
+                    step_freq=1.4, sim_dt=0.004, decimation=5, history_length=5,
+                    kp=35.0, kd=0.5, armature=0.01)
 
 # MuJoCo camera geometry baked into the scene XML (training D435-equivalent).
 CAM_POS = D435_DEPTH_POSITION_BASE   # depth origin in trunk/base frame
@@ -67,31 +70,38 @@ CAM_FOVY = 56.5              # vertical FOV deg
 DEPTH_W, DEPTH_H = 106, 60
 
 # Training dynamics parameters to align (go1_asset.py DelayedPDActuatorCfg).
-TRAIN_DT = 0.005              # IsaacLab sim.dt
 GO1_MIN_DELAY = 0             # actuator command delay (physics steps), randomized per env
 GO1_MAX_DELAY = 2
 # NOTE: soft_joint_pos_limit_factor=0.95 is NOT a command clamp in training -- it only feeds
 # the joint_pos_limits reward / joint_pos_out_of_limits termination (JointPositionActionCfg
 # sets the target directly via set_joint_position_target with no clamp). So we do NOT replicate
-# it here; the MuJoCo position actuator's ctrlrange is the real hard joint limit.
+# it here; position actuator target clamping is disabled below.
 
 
 # --- XML building (m1-style: extract inner, absolute meshdir, inject terrain+camera) ----
 
-def _go1_xml_inner(kp: float = 30.0):
-    """Return the go1.xml body inside <mujoco>..</mujoco> with absolute meshdir
-    and the position-actuator stiffness set to ``kp`` (default 30 to match IsaacLab
-    training stiffness; 100 = the mujoco_menagerie model's own tuned default)."""
-    txt = open(GO1_XML).read()
+def _go1_xml_inner(kp: float = 35.0, kd: float = 0.5, armature: float = 0.01):
+    """Return GO1 XML with training gains and unclamped position targets."""
+    with open(GO1_XML) as source:
+        txt = source.read()
     i = txt.find("<mujoco")
     j = txt.find(">", i) + 1
     k = txt.rfind("</mujoco>")
     inner = txt[j:k]
     mdir = os.path.join(os.path.dirname(GO1_XML), "assets")
     inner = re.sub(r'meshdir="[^"]*"', f'meshdir="{mdir}"', inner)
-    # override the position-actuator servo stiffness (damping/armature in the XML
-    # defaults already match GO1_DAMPING=2 / GO1_ARMATURE=0.01).
-    inner = re.sub(r'<position kp="100"', f'<position kp="{kp}"', inner)
+    # Override the Menagerie defaults with nominal training dynamics.
+    root = ET.fromstring('<mujoco>' + inner + '</mujoco>')
+    for joint in root.findall('.//default/joint'):
+        joint.set('damping', str(kd))
+        joint.set('armature', str(armature))
+        joint.set('frictionloss', '0')
+    for actuator in root.findall('.//default/position'):
+        if 'kp' in actuator.attrib:
+            actuator.set('kp', str(kp))
+        # IsaacLab clips raw actions, not the resulting position targets.
+        actuator.set('ctrllimited', 'false')
+    inner = ''.join(ET.tostring(child, encoding='unicode') for child in root)
     return inner
 
 
@@ -115,6 +125,13 @@ def _fbm_values(shape, scales=(1, 2, 4, 8, 16), amplitudes=(0.25, 0.25, 0.2, 0.1
     return (out / total + 1.0) / 2.0
 
 
+def _sync_realtime(wall_start, sim_elapsed):
+    """Wait for the cumulative simulation deadline; never change physics dt."""
+    remaining = wall_start + sim_elapsed - time.perf_counter()
+    if remaining > 0:
+        time.sleep(remaining)
+
+
 def _camera_quat():
     """Orthogonal camera frame quat (image-up = world-up projected onto the plane
     perpendicular to the 30-deg-down look axis); avoids a skewed depth image."""
@@ -130,10 +147,11 @@ def _camera_quat():
 
 
 def build_go1_scene_xml(scene="flat", step_rise=0.12, step_tread=0.30, n_steps=12,
-                        width=6.0, perlin_amp=0.18, kp=30.0,
-                        camera_position=CAM_POS, camera_quaternion=None):
+                        width=6.0, perlin_amp=0.18, kp=35.0, kd=0.5, armature=0.01,
+                        camera_position=CAM_POS, camera_quaternion=None,
+                        camera_intrinsics=None, camera_size=(DEPTH_H, DEPTH_W)):
     """Compose a scene XML: go1 robot + terrain + baked depth camera."""
-    inner = _go1_xml_inner(kp=kp)
+    inner = _go1_xml_inner(kp=kp, kd=kd, armature=armature)
     cam_q = " ".join(f"{v:.6f}" for v in (_camera_quat() if camera_quaternion is None else camera_quaternion))
 
     assets = (
@@ -179,7 +197,7 @@ def build_go1_scene_xml(scene="flat", step_rise=0.12, step_tread=0.30, n_steps=1
         xf = int(round(4.0 / 10.0 * ncol))
         Hf[:, :xf] = 0.5
         cv2.imwrite(png, (Hf * 255.0).astype(np.uint8))
-        assets += f'<hfield name="perlin" size="5 10 0.001 {perlin_amp}" nrow="{nrow}" ncol="{ncol}" file="{png}"/>\n'
+        assets += f'<hfield name="perlin" size="5 10 {perlin_amp} 0.001" nrow="{nrow}" ncol="{ncol}" file="{png}"/>\n'
         geoms = '<geom type="hfield" hfield="perlin" pos="9 0 0" size="1 1 1" material="groundplane"/>\n'
         # flat ground under the robot + safety floor
         geoms += '<geom name="flat_approach" type="plane" pos="0 0 0" size="8 20 0.05" material="groundplane"/>\n'
@@ -213,7 +231,7 @@ def build_go1_scene_xml(scene="flat", step_rise=0.12, step_tread=0.30, n_steps=1
         cv2.imwrite(png, (Hf * 255.0).astype(np.uint8))
         perlin_x_half = 3.5
         perlin_x_center = x + 1.0 + perlin_x_half   # small flat gap after the stairs
-        assets += (f'<hfield name="perlin" size="{perlin_x_half} 8 0.001 {perlin_amp}" '
+        assets += (f'<hfield name="perlin" size="{perlin_x_half} 8 {perlin_amp} 0.001" '
                    f'nrow="{nrow}" ncol="{ncol}" file="{png}"/>\n')
         geoms += f'<geom type="hfield" hfield="perlin" pos="{perlin_x_center} 0 0" size="1 1 1" material="groundplane"/>\n'
         geoms += '<geom name="safety_floor" type="plane" size="40 40 0.05" pos="0 0 -2.0"/>\n'
@@ -223,7 +241,19 @@ def build_go1_scene_xml(scene="flat", step_rise=0.12, step_tread=0.30, n_steps=1
     # bake the depth camera into the XML as the FIRST child of the trunk body so its
     # pose (0.26, 0, 0.12) is in the trunk frame and it tracks the robot (a camera at
     # worldbody level would not follow the trunk).
-    camera = f'<camera name="depth_cam" pos="{camera_position[0]} {camera_position[1]} {camera_position[2]}" quat="{cam_q}" fovy="{CAM_FOVY}"/>\n'
+    h, w = camera_size
+    if camera_intrinsics is None:
+        camera_projection = f'fovy="{CAM_FOVY}"'
+    else:
+        K = np.asarray(camera_intrinsics, dtype=float)
+        if K.shape != (3, 3) or not np.isfinite(K).all() or min(K[0, 0], K[1, 1]) <= 0:
+            raise ValueError('Invalid camera intrinsics')
+        if not np.allclose(K[[0, 1], [1, 0]], 0) or not np.allclose(K[2], [0, 0, 1]):
+            raise ValueError('Only zero-skew pinhole camera intrinsics are supported')
+        camera_projection = (f'sensorsize="{w} {h}" resolution="{w} {h}" '
+                             f'focal="{K[0, 0]} {K[1, 1]}" '
+                             f'principal="{w / 2 - K[0, 2]} {h / 2 - K[1, 2]}"')
+    camera = f'<camera name="depth_cam" pos="{camera_position[0]} {camera_position[1]} {camera_position[2]}" quat="{cam_q}" {camera_projection}/>\n'
     inner = inner.replace("<worldbody>", "<worldbody>\n" + geoms)
     inner = inner.replace("<asset>", "<asset>\n" + assets)
     trunk_open = '<body name="trunk"'
@@ -247,27 +277,28 @@ def _projected_gravity(quat_wxyz):
     return (a - b + c).numpy().flatten()
 
 
-def _make_key_callback(ctl):
-    """glfw keycode callback editing the shared command dict (matches reference)."""
+def _make_key_callback(ctl, command_a):
+    """Keyboard commands bounded by the student's training amplitudes."""
+    vx_max, vy_max, wz_max = command_a
     def key_callback(keycode):
         if keycode == 256:                       # ESC
             ctl["quit"] = True
         elif keycode == 265:                     # Up -> vx +0.1
-            ctl["vx"] = min(ctl["vx"] + 0.1, 1.0)
+            ctl["vx"] = min(ctl["vx"] + 0.1, vx_max)
         elif keycode == 264:                     # Down -> vx -0.1
-            ctl["vx"] = max(ctl["vx"] - 0.1, -0.5)
+            ctl["vx"] = max(ctl["vx"] - 0.1, -vx_max)
         elif keycode in (263, 65):               # Left / A -> vy +0.1
-            ctl["vy"] = min(ctl["vy"] + 0.1, 0.5)
+            ctl["vy"] = min(ctl["vy"] + 0.1, vy_max)
         elif keycode in (262, 68):               # Right / D -> vy -0.1
-            ctl["vy"] = max(ctl["vy"] - 0.1, -0.5)
+            ctl["vy"] = max(ctl["vy"] - 0.1, -vy_max)
         elif keycode == 81:                      # Q -> wz +0.1
-            ctl["wz"] = min(ctl["wz"] + 0.1, 1.0)
+            ctl["wz"] = min(ctl["wz"] + 0.1, wz_max)
         elif keycode == 69:                      # E -> wz -0.1
-            ctl["wz"] = max(ctl["wz"] - 0.1, -1.0)
+            ctl["wz"] = max(ctl["wz"] - 0.1, -wz_max)
         elif keycode == 86:                      # V -> stop
             ctl["vx"] = ctl["vy"] = ctl["wz"] = 0.0
         elif keycode == 67:                      # C -> cruise
-            ctl["vx"], ctl["vy"], ctl["wz"] = 0.4, 0.0, 0.0
+            ctl["vx"], ctl["vy"], ctl["wz"] = min(0.4, vx_max), 0.0, 0.0
     return key_callback
 
 
@@ -295,10 +326,8 @@ def main():
     parser.add_argument("--step_tread", type=float, default=0.30, help="stair step depth (m, default 0.30 = training step_width)")
     parser.add_argument("--n_steps", type=int, default=12, help="stair steps up (then down)")
     parser.add_argument("--stair_width", type=float, default=6.0, help="stair width (m, default 6.0)")
-    parser.add_argument("--kp", type=float, default=30.0,
-                        help="position-actuator stiffness (default 30 = IsaacLab training stiffness; "
-                             "100 = mujoco_menagerie model default). kp=30 may be too soft for the "
-                             "menagerie mass -> legs flop -> tips over on stairs; try --kp 100.")
+    parser.add_argument("--kp", type=float, default=None, help="Override training stiffness.")
+    parser.add_argument("--kd", type=float, default=None, help="Override training damping.")
     parser.add_argument("--no_act_delay", action="store_true",
                         help="disable the actuator command delay (training uses DelayedPDActuator "
                              "0-2 physics steps; use for an ablation)")
@@ -325,7 +354,8 @@ def main():
     env_yaml = os.path.join(run_dir, "params", "env.yaml")
     if os.path.exists(env_yaml):
         import yaml
-        y = yaml.unsafe_load(open(env_yaml))
+        with open(env_yaml) as source:
+            y = yaml.unsafe_load(source)
         tcfg = dict(
             action_scale=y.get("action_scale", GO1_DEFAULTS["action_scale"]),
             clip_actions=y.get("desired_clip_actions", GO1_DEFAULTS["clip_actions"]),
@@ -334,12 +364,39 @@ def main():
             sim_dt=y["sim"]["dt"] if "sim" in y else GO1_DEFAULTS["sim_dt"],
             decimation=y.get("decimation", GO1_DEFAULTS["decimation"]),
             history_length=y.get("history_length", GO1_DEFAULTS["history_length"]),
+            kp=GO1_DEFAULTS['kp'], kd=GO1_DEFAULTS['kd'], armature=GO1_DEFAULTS['armature'],
         )
+        actuators = y.get('robot', {}).get('actuators', {})
+        gains = [tuple(a.get(key, GO1_DEFAULTS[default]) for key, default in
+                       [('stiffness', 'kp'), ('damping', 'kd'), ('armature', 'armature')])
+                 for a in actuators.values()]
+        if gains:
+            if any(g != gains[0] for g in gains):
+                raise ValueError('Per-joint PD gains require explicit sim2sim mapping; uniform gains expected')
+            tcfg['kp'], tcfg['kd'], tcfg['armature'] = gains[0]
+    else:
+        print('[WARN] params/env.yaml missing; using nominal GO1 dynamics, not verified run parameters.')
     rl_freq = 1.0 / (tcfg["sim_dt"] * tcfg["decimation"])   # 50 Hz
 
     # --- load student policy ---
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     md = ckpt["metadata"]
+    command_a = np.asarray(md.get('command_a', [0.8, 0.4, 0.8]), dtype=float)
+    if command_a.shape != (3,) or not np.isfinite(command_a).all() or (command_a < 0).any():
+        raise ValueError('command_a must contain three finite nonnegative amplitudes')
+    if 'command_a' not in md:
+        print('[WARN] command_a missing; keyboard uses nominal student limits [0.8, 0.4, 0.8].')
+    print(f'[INFO] keyboard command limits: +/-{command_a.tolist()} (vx, vy, wz).')
+    control_period = float(md.get('depth_camera', {}).get('control_period', 1.0 / rl_freq))
+    if not np.isclose(control_period, 1.0 / rl_freq):
+        raise ValueError('Checkpoint control period differs from params/env.yaml')
+    if md['common_obs_size'] % tcfg['history_length']:
+        raise ValueError('Observation history length does not divide common_obs_size')
+    obs_frame_size = md['common_obs_size'] // tcfg['history_length']
+    if obs_frame_size not in (45, 49) or md['action_size'] != 12 or md['depth_channels'] != 1:
+        raise ValueError('Expected GO1 student: 45/49-dim frames, 12 actions, one depth channel')
+    use_clock = obs_frame_size == 49
+    depth_h, depth_w = map(int, md.get('depth_image_size', (DEPTH_H, DEPTH_W)))
     net = DaggerNet(vec_size=md["common_obs_size"], output_size=md["action_size"],
                     depth_channels=md["depth_channels"]).to("cpu")
     net.load_state_dict(ckpt["model_state_dict"])
@@ -353,9 +410,9 @@ def main():
     print(f"[INFO] rl_freq={rl_freq:.1f} obs={md['common_obs_size']} depth_len={depth_len} "
           f"depth_fps={depth_fps} blur_sigma={blur_sigma} delay={delay} history step(s)")
 
-    # Use saved optical pose; older students without pose metadata used the screw origin.
+    # Use saved optical pose, not the mounting screw origin.
     camera_meta = md.get("depth_camera", {})
-    camera_position = camera_meta.get("position_base", (0.26, 0.0, 0.12))
+    camera_position = camera_meta.get("position_base", D435_DEPTH_POSITION_BASE)
     camera_quaternion = None
     if "quaternion_wxyz" in camera_meta:
         if camera_meta.get("convention") != "ros":
@@ -363,19 +420,35 @@ def main():
         w, x, y, z = camera_meta["quaternion_wxyz"]
         # ROS -> OpenGL camera axes: postmultiply by Rx(pi).
         camera_quaternion = (-x, w, z, -y)
+    else:
+        w, x, y, z = D435_DEPTH_QUATERNION_ROS_WXYZ
+        camera_quaternion = (-x, w, z, -y)
+        print('[WARN] Camera extrinsics missing; using current nominal D435 optical pose.')
+    camera_intrinsics = camera_meta.get('intrinsics')
+    if camera_intrinsics is None:
+        f = depth_w * 24.0 / 45.55
+        camera_intrinsics = [[f, 0, depth_w / 2], [0, f, depth_h / 2], [0, 0, 1]]
+        print('[WARN] Camera intrinsics missing; using nominal D435 pinhole intrinsics.')
+    if camera_meta.get('depth_type', 'distance_to_image_plane') != 'distance_to_image_plane':
+        raise ValueError('Only optical Z-depth checkpoints are supported')
     # --- build + load the scene (go1 + terrain + depth cam) ---
     xml = build_go1_scene_xml(scene=args.scene, step_rise=args.step_rise, step_tread=args.step_tread,
                               n_steps=args.n_steps, width=args.stair_width, perlin_amp=args.perlin_amp,
-                              kp=args.kp, camera_position=camera_position,
-                              camera_quaternion=camera_quaternion)
+                              kp=tcfg['kp'] if args.kp is None else args.kp,
+                              kd=tcfg['kd'] if args.kd is None else args.kd,
+                              armature=tcfg['armature'], camera_position=camera_position,
+                              camera_quaternion=camera_quaternion,
+                              camera_intrinsics=camera_intrinsics, camera_size=(depth_h, depth_w))
     model = mujoco.MjModel.from_xml_string(xml)
-    # align physics timestep with training (sim.dt = 0.005)
-    model.opt.timestep = TRAIN_DT
+    # Use the training run's physics timestep, not only its control frequency.
+    model.opt.timestep = tcfg['sim_dt']
     data = mujoco.MjData(model)
     depth_cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "depth_cam")
     assert depth_cam_id >= 0, "depth_cam camera missing from scene XML"
-    cam = MujocoDepthCamera(model, data, depth_cam_id, width=DEPTH_W, height=DEPTH_H,
-                            update_period=1.0 / depth_fps)
+    cam = MujocoDepthCamera(model, data, depth_cam_id, width=depth_w, height=depth_h,
+                            update_period=1.0 / depth_fps, intrinsics=camera_intrinsics,
+                            ray_max_distance=3.0 if 'RayCaster' in md.get('task', '') else None)
+    print(f'[INFO] obs_frame={obs_frame_size}, clock={use_clock}, depth={depth_w}x{depth_h}, K={camera_intrinsics}')
 
     # --- actuator -> policy-joint mapping (per-leg actuators vs hip/thigh/calf blocks) ---
     # go1.xml actuator names are "{joint}" (e.g. "FR_hip" controls "FR_hip_joint").
@@ -408,12 +481,20 @@ def main():
     print(f"[INFO] settled trunk z={data.xpos[model.body('trunk').id, 2]:.3f} (dt={model.opt.timestep})")
 
     # --- state buffers (newest at END, matching training) ---
-    S = md["common_obs_size"] // tcfg["history_length"]      # 49 (no base_lin_vel)
+    S = obs_frame_size
     obs_hist = np.zeros((tcfg["history_length"], S), dtype=np.float32)
-    hist = np.zeros((depth_len + delay, 1, DEPTH_H, DEPTH_W), dtype=np.float16)
+    hist = np.zeros((depth_len + delay, 1, depth_h, depth_w), dtype=np.float16)
     phase = np.array([0.0, 0.5, 0.5, 0.0])                   # FL, FR, RL, RR
     past_actions = np.zeros(model.nu, dtype=np.float32)
     ctl = {"vx": _vx, "vy": _vy, "wz": _wz}   # headless: fixed --cmd; --viewer keyboard overrides
+    if args.viewer:
+        initial_cmd = np.array([_vx, _vy, _wz])
+        if not np.isfinite(initial_cmd).all():
+            raise ValueError('Viewer initial command must be finite')
+        bounded_cmd = np.clip(initial_cmd, -command_a, command_a)
+        if not np.array_equal(initial_cmd, bounded_cmd):
+            print(f'[WARN] Viewer initial --cmd clipped to {bounded_cmd.tolist()}.')
+        ctl.update(zip(('vx', 'vy', 'wz'), bounded_cmd))
     last_cmd = None
 
     sim_dt = model.opt.timestep
@@ -436,7 +517,7 @@ def main():
             print("[ERROR] --viewer needs a display; run headless without it.")
             sys.exit(1)
         ctl["quit"] = False
-        viewer = mujoco.viewer.launch_passive(model, data, key_callback=_make_key_callback(ctl))
+        viewer = mujoco.viewer.launch_passive(model, data, key_callback=_make_key_callback(ctl, command_a))
         viewer.cam.distance = 3.2
         viewer.cam.azimuth = 270.0
         viewer.cam.elevation = -18.0
@@ -460,17 +541,21 @@ def main():
         video_path = os.path.join(run_dir, "videos", "dagger_play", f"mj_sim2sim_go1_{ckpt_tag}.mp4")
         os.makedirs(os.path.dirname(video_path), exist_ok=True)
 
+    completed_steps = 0
+    # Start after settling and renderer/viewer setup, not at application launch.
+    wall_start = time.perf_counter()
+    sim_start = data.time
+    if args.viewer:
+        print('[INFO] viewer real-time synchronization enabled (target speed=1x).')
     for p in range(N_policy):
         if args.viewer and (not viewer.is_running() or ctl.get("quit")):
             print("[INFO] viewer closed -> stopping early")
             break
 
         quat = data.qpos[3:7]
-        R = data.xmat[base_id].reshape(3, 3)
-        # MuJoCo free-joint qvel[3:6] is the WORLD-frame angular velocity; IsaacLab's
-        # root_ang_vel_b is body-frame, so rotate into the trunk frame (verified by test:
-        # roll 90 deg + world-z rotation -> qvel=[0,0,1], body-frame=[0,1,0]).
-        ang_vel_b = R.T @ data.qvel[3:6]
+        # Free-joint angular qvel is already in the local body frame, matching
+        # IsaacLab root_ang_vel_b. Do not rotate it from world to body again.
+        ang_vel_b = data.qvel[3:6].copy()
         grav_b = _projected_gravity(quat)
         jp = np.array([data.qpos[model.jnt_qposadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, nm)]]
                        for nm in DESIRED_ORDER])
@@ -480,10 +565,11 @@ def main():
         if args.viewer and (last_cmd is None or np.any(np.abs(cmd - last_cmd) > 1e-3)):
             print(f"[CMD] vx={ctl['vx']:+.2f} vy={ctl['vy']:+.2f} wz={ctl['wz']:+.2f}", flush=True)
             last_cmd = cmd
-        # 49-dim student obs frame (NO base_lin_vel)
+        # 45-dim frame without clock; older clock-enabled students use 49 dims.
         obs1 = np.concatenate([ang_vel_b, grav_b, cmd, jp - DEFAULT_JOINT, jv, past_actions])
-        phase = (phase + tcfg["step_freq"] / rl_freq) % 1.0
-        obs1 = np.concatenate([obs1, phase]) if np.linalg.norm(cmd) > 0.01 else np.concatenate([obs1, -np.ones(4)])
+        if use_clock:
+            phase = (phase + tcfg["step_freq"] / rl_freq) % 1.0
+            obs1 = np.concatenate([obs1, phase]) if np.linalg.norm(cmd) > 0.01 else np.concatenate([obs1, -np.ones(4)])
         obs_hist = np.roll(obs_hist, -1, axis=0)
         obs_hist[-1] = obs1
 
@@ -527,7 +613,7 @@ def main():
             d_resized = cv2.resize(d_bgr, (w, h), interpolation=cv2.INTER_CUBIC)
             frame = np.hstack([rgb, d_resized])
             if writer is None:
-                writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*"mp4v"), 50,
+                writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*"mp4v"), rl_freq,
                                          (frame.shape[1], frame.shape[0]))
             writer.write(frame)
 
@@ -553,18 +639,25 @@ def main():
                 if jn in policy_idx:
                     data.ctrl[i] = ctrl_target[policy_idx[jn]]
             mujoco.mj_step(model, data)
+        # mj_step integrates qpos after computing kinematics. Refresh poses so
+        # camera/gravity observations correspond to the same state as qpos/qvel.
+        mujoco.mj_forward(model, data)
+        completed_steps += 1
 
         if args.viewer:
             viewer.cam.lookat[:] = data.xpos[base_id]
             viewer.sync()
 
-        if np.linalg.norm(data.cfrc_ext[base_id]) > 1e-3:
+        if any(base_id in (model.geom_bodyid[c.geom1], model.geom_bodyid[c.geom2])
+               for c in data.contact):
             base_contact += 1
         if p % 200 == 0:
             print(f"[INFO] p={p} base=({data.qpos[0]:.2f},{data.qpos[1]:.2f},{data.qpos[2]:.2f}) "
                   f"base_contact={base_contact}")
+        if args.viewer:
+            _sync_realtime(wall_start, data.time - sim_start)
 
-    print(f"[RESULT] policy_steps={p + 1} base_contact={base_contact} "
+    print(f"[RESULT] policy_steps={completed_steps} base_contact={base_contact} "
           f"base=({data.qpos[0]:.2f},{data.qpos[1]:.2f},{data.qpos[2]:.2f})")
     if args.viewer:
         viewer.close()
@@ -572,6 +665,9 @@ def main():
     if writer is not None:
         writer.release()
         print(f"[INFO] dual-pane video saved: {video_path}")
+    cam.close()
+    if rgb_renderer is not None:
+        rgb_renderer.close()
 
 
 if __name__ == "__main__":

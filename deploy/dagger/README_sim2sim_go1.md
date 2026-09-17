@@ -17,30 +17,32 @@ python deploy/dagger/play_mujoco_dagger_go1.py \
   --scene stairs --viewer
 ```
 
-- **Tiled / RayCaster 通用**：两个学生相机配置相同（HFOV 87°、106×60 = D435 848×480/8、vFOV ~56.5°、位姿 (0.26,0,0.12)），脚本只读 checkpoint——换 `--ckpt` 即可。MuJoCo 相机 `fovy` 已按 106×60 设为 56.5°，渲染分辨率 `DEPTH_W/H` 同步为 106×60。
+- **Tiled / RayCaster 通用**：从 checkpoint 读取分辨率、完整内参 K 和 ROS optical 外参，转换到 MuJoCo/OpenGL 相机坐标系。相机位置是深度光心，不是安装螺孔；旧 checkpoint 缺少标定时会告警并使用当前名义标定。
 - `--viewer` 需要显示；headless 用 EGL（`MUJOCO_GL=egl`，默认）。
+- `--viewer` 默认按真实时间限速（目标 1×），headless 不限速。计算/渲染太慢时仍会慢于实时，不修改物理步长或跳过控制步。
 - 键盘：`Up/Down`=vx、`Left/Right`(+A/D)=vy、`Q/E`=wz（每次 ±0.1）、`V`=停止、`C`=巡航(0.4,0,0)、`ESC`=退出。
-- 默认录双窗视频到 `<ckpt目录>/videos/dagger_play/mj_sim2sim_go1.mp4`；`--no_video` 跳过。
+- 键盘范围读取学生 checkpoint 的 `command_a`，缺失时告警并使用 ±(0.8,0.4,0.8)。巡航及 viewer 初始 `--cmd` 也限制在该范围内；headless 的显式 `--cmd` 保持不裁剪。
+- 默认录双窗视频到 `<ckpt目录>/videos/dagger_play/mj_sim2sim_go1_<checkpoint名>.mp4`；`--no_video` 跳过。
 
 ### 场景
 
 | `--scene` | 说明 |
 |---|---|
 | `flat` | 平地 |
-| `stairs` | 上 12 阶→平台→下 12 阶（`--step_rise` 默认 0.15m、`--stair_width` 默认 6m，可调）|
+| `stairs` | 上 12 阶→平台→下 12 阶（`--step_rise` 默认 0.12m、`--stair_width` 默认 6m，可调）|
 | `perlin` | 分形噪声 hfield（`--perlin_amp`）|
 | `course` | 平地起步 → 楼梯上/下 → perlin 崎岖地形（`--cmd "0.5 0 0"` 纯前向）|
 
 ## 关键实现点
 
-- **控制**：go1.xml 自带 `<position>` 执行器，脚本写**目标位置**到 `ctrl`；XML 里把 `kp=100` 覆盖为 `kp=30`（对齐训练 stiffness=30），关节 `damping=2/armature=0.01` 已与训练一致。位置执行器内部完成 PD。
-- **obs**：49 维/帧（**无 base_lin_vel**）`[ang_vel, gravity, cmd, qpos-default, qvel, prev_action, clock]` × 5 历史 = 245，与训练学生 `common` 一致。
-- **深度**：MuJoCo 离屏渲染 → `>3m / <0.01m → far` → clip[0.1,2.0] → **高斯 blur（σ 从 metadata 的 `depth_sensor_noise.blur_sigma`）** → 5 帧历史（含 `depth_delay_frames` 延迟）。
+- **控制**：从 checkpoint 同目录的 `params/env.yaml` 读取物理步长、decimation、动作缩放、滤波开关和均一 PD/armature 参数。缺少文件会告警，名义值为 dt=0.004、decimation=5、kp=35、kd=0.5、armature=0.01。目标位置不额外 clamp；动作滤波使用上一帧 raw clipped action。可用 `--kp/--kd` 显式覆盖。
+- **obs**：当前学生每帧 45 维 `[ang_vel_b, gravity_b, cmd, qpos-default, qvel, prev_action]`，5 帧共 225 维，无 base_lin_vel/clock。根据 checkpoint 维度也兼容旧 49×5=245 的 clock 模型。freejoint 的 `qvel[3:6]` 已在 base 坐标系，不再次旋转。
+- **深度**：返回米制 optical Z-depth，图像原点在左上；保留机器人 visual mesh 的自遮挡，与训练 MultiMeshRayCaster 一致，RayCaster 模式按 3m 射线长度排除超范围命中。复用训练预处理、噪声、历史和控制步延迟。相机按 metadata 的采样周期缓存，历史每控制步更新，可能包含重复帧。
 - **GRU**：每步 `net(seq, common, hidden=None)` 零状态，与训练一致。
-- **指标**：`base_contact`（trunk 受外力次数）、最终 trunk 位置。
+- **指标**：`base_contact` 是 trunk 有几何接触的控制步数，不是跌倒率/成功率；另输出最终 trunk 位置。
 
 ## 注意事项
 
-- **深度方向**：未做 Isaac Lab↔MuJoCo 图像方向校准工具；相机用正交帧构造（image-up=world-up 投影）。若 `--viewer` 深度窗里上下颠倒，调 `CAM_PITCH_DEG` 或 depth 的 flip。
-- **kp/动力学**：`kp=30` 若步态不稳，改 `_go1_xml_inner()` 里的 `kp="30"` 微调。
+- **验证**：`python -m unittest discover -s deploy/dagger/tests -v` 检查角速度坐标系、增益、非居中主点投影、深度单位/方向、射线范围、缓存和 225/245 维端到端 rollout（需要 EGL）。
+- **动力学与评估**：MuJoCo Menagerie 与 IsaacLab 的机器人模型、接触和随机化并非完全一致。sim2sim 测试迁移效果；判断训练是否收敛仍应在 IsaacLab 做固定地形/指令的纯学生评估。这里不会自动跌倒重置；建议先低速 `--cmd "0.3 0 0"`，不要用超出训练范围的键盘指令。
 - **blur/延迟**：必须从 metadata 复现（训练默认开），否则输入分布偏移。
