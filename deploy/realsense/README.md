@@ -1,7 +1,7 @@
 # RealSense D435 真机深度测试
 
 独立于 IsaacLab 和学生策略的硬件测试。默认打开原始、未对齐 RGB 的
-`848×480 @ 30 Hz` Z16 深度流，不启用软件滤波/补洞或策略预处理。
+`848×480 @ 30 Hz` Z16 深度流，不启用相机软件滤波/补洞。
 所有脚本支持 `--width`、`--height`、`--fps`、`--serial`、`--timeout_ms`。
 
 ## 安装与运行
@@ -12,6 +12,7 @@
 python -m pip install -r deploy/realsense/requirements.txt
 python deploy/realsense/test_depth_distance.py
 python deploy/realsense/view_depth.py
+python deploy/realsense/view_student_depth.py
 python deploy/realsense/export_intrinsics.py
 ```
 
@@ -19,6 +20,13 @@ python deploy/realsense/export_intrinsics.py
 中心像素为 0 表示没有有效深度，不表示目标就在相机上。
 距离是深度 optical frame 的 Z 值，不是机器人 base 坐标系距离，也不是射线欧氏长度。
 预览中的有效比例是非零像素比例，host FPS 是应用接收帧速率，不是硬件精度指标。
+
+`view_student_depth.py` 是单窗口的学生深度**单帧外观**预览，采用训练双栏视频
+`--dual_pane_student_depth` 的灰度规则：近白、远黑。它从原始 Z16 转米，
+以最近像素采样到 106×60（避免把零值平均成假近深度），把零值映射为 2.0 m，
+其余深度裁剪到 [0.1, 2.0] m；窗口直接显示处理后的 106×60 图像。
+不加载 checkpoint，不额外添加噪声、模糊、dropout、延迟或五帧历史。
+因此它不是可直接送入学生网络的完整五帧输入，也不完全复刻训练时开启的模糊。
 
 ## 标定输出与训练对齐
 
