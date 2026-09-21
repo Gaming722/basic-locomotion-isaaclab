@@ -41,6 +41,9 @@ parser.add_argument("--follow_env", type=int, default=600,
                          "leading command-zero environments.")
 parser.add_argument("--terrain", type=str, default="rough",
                     help="Tiled env terrain: rough | stairs | slope | flat (e.g. --terrain stairs to record stair climbing).")
+parser.add_argument("--stair_direction", choices=("up", "down"), default=None,
+                    help="Eval with --terrain stairs only: keep inverted stairs for uphill play, "
+                         "or regular pyramid stairs for downhill play. Default keeps both.")
 parser.add_argument("--difficulty", type=float, default=None,
                     help="Fixed terrain difficulty 0.0-1.0 applied to every sub-terrain (e.g. --difficulty 1.0 with "
                          "--terrain stairs gives all-max-height stairs). Default None = random per sub-terrain.")
@@ -199,6 +202,13 @@ parser.add_argument(
          "updates, no checkpoint saves. The step counter starts at 0.",
 )
 parser.add_argument(
+    "--keyboard",
+    action="store_true",
+    default=False,
+    help="During --eval, use viewport keyboard velocity commands instead of random commands. "
+         "Requires a visible Isaac Sim window.",
+)
+parser.add_argument(
     "--eval_policy",
     type=str,
     default=None,
@@ -270,6 +280,7 @@ from basic_locomotion_isaaclab.assets.d435_geometry import (
 )
 from basic_locomotion_isaaclab.tasks.custom_events import get_num_fixed_command_envs
 from dagger_network import DaggerNet, DaggerReplayBuffer
+from keyboard_control import install_isaac_keyboard_commands
 from depth_pipeline import PIPELINE_VERSION, preprocess_depth, depth_sequence_from_history
 from video_follow import rotating_video_env
 
@@ -445,11 +456,15 @@ def _validate_eval_cli_args() -> str:
     eval_policy_path = os.path.abspath(args_cli.eval_policy)
     if not os.path.exists(eval_policy_path):
         raise FileNotFoundError(f"--eval_policy not found: {eval_policy_path}")
+    if args_cli.keyboard and args_cli.headless:
+        raise SystemExit("--keyboard requires a visible Isaac Sim window (omit --headless).")
     if args_cli.headless and args_cli.max_training_steps is None:
         raise SystemExit(
             "--eval with --headless needs --max_training_steps <N> "
             "(otherwise the evaluation would run forever on a server)."
         )
+    if args_cli.keyboard and args_cli.cmd:
+        raise SystemExit("Use --keyboard or --cmd, not both.")
     if args_cli.cmd:
         try:
             _ = [float(x) for x in args_cli.cmd.split()]
@@ -564,6 +579,16 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
     input/output.
     """
     device = env.unwrapped.device
+    ckpt = torch.load(eval_policy_path, map_location=device, weights_only=False)
+
+    # Install before the first explicit observation, including after episode resets.
+    keyboard_subscription = None
+    if args_cli.keyboard:
+        keyboard_subscription = install_isaac_keyboard_commands(
+            env, ckpt.get("metadata", {}).get("command_a", env.unwrapped.cfg.command_a))
+    elif args_cli.cmd:
+        _install_fixed_command(env)
+
     obs = env.get_observations()
     current_depth_cpu = _sanitize_depth_data(env).detach().to(device="cpu", dtype=torch.float16)
 
@@ -576,11 +601,8 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
         gym.spaces.flatdim(single_action_space) if single_action_space is not None else env.action_space.shape[-1]
     )
     depth_channels = current_depth_cpu.shape[1]
-
-    # Patch BEFORE the first step so the very first observation already carries the fixed command.
-    if args_cli.cmd:
-        _install_fixed_command(env)
-    follow_env = _effective_follow_env(args_cli.follow_env, env, has_fixed_cmd=args_cli.cmd is not None)
+    follow_env = _effective_follow_env(
+        args_cli.follow_env, env, has_fixed_cmd=args_cli.cmd is not None or args_cli.keyboard)
 
     history_capacity = args_cli.depth_history_length + args_cli.depth_delay_frames
     depth_history = current_depth_cpu.unsqueeze(0).repeat(history_capacity, 1, 1, 1, 1).contiguous()
@@ -591,7 +613,6 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
         output_size=action_size,
         depth_channels=depth_channels,
     ).to(device)
-    ckpt = torch.load(eval_policy_path, map_location=device, weights_only=False)
     _check_student_ckpt_compat(ckpt, dagger_net, tuple(current_depth_cpu.shape[-2:]))
     dagger_net.load_state_dict(ckpt["model_state_dict"])
     dagger_net.eval()
@@ -611,7 +632,7 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
         f"difficulty={getattr(env_cfg, 'difficulty', None)}, num_envs={num_envs}, follow_env={follow_env}, "
         f"depth_history={args_cli.depth_history_length}, depth_delay={args_cli.depth_delay_frames}, "
         f"steps={'until the window closes' if max_steps is None else max_steps}, "
-        f"cmd={args_cli.cmd if args_cli.cmd else 'random'}, "
+        f"cmd={'keyboard' if args_cli.keyboard else (args_cli.cmd if args_cli.cmd else 'random')}, "
         f"video={'dual-pane' if (args_cli.video and args_cli.dual_pane) else ('rgb' if args_cli.video else 'off')})."
     )
 
@@ -692,6 +713,10 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Train a depth-conditioned student with online DAgger supervision."""
+    if args_cli.keyboard and not args_cli.eval:
+        raise ValueError("--keyboard is only available with --eval.")
+    if args_cli.stair_direction and (not args_cli.eval or args_cli.terrain != "stairs"):
+        raise ValueError("--stair_direction requires --eval --terrain stairs.")
     # grab task name for checkpoint path
     task_name = args_cli.task.split(":")[-1]
     train_task_name = task_name.replace("-Play", "")
@@ -709,6 +734,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         raise ValueError(f"--difficulty must be in [0.0, 1.0], got {args_cli.difficulty}")
     env_cfg.difficulty = args_cli.difficulty
     env_cfg.rebuild_terrain()  # __post_init__ already ran at hydra parse; rebuild with the CLI terrain
+    if args_cli.stair_direction:
+        # The terrain origin is the central platform. An inverted pyramid starts
+        # in the low center and climbs outward; a regular pyramid descends.
+        key = "pyramid_stairs_inv" if args_cli.stair_direction == "up" else "pyramid_stairs"
+        stair_cfg = env_cfg.terrain.terrain_generator.sub_terrains[key]
+        stair_cfg.proportion = 1.0
+        env_cfg.terrain.terrain_generator.sub_terrains = {key: stair_cfg}
+        print(f"[INFO] Stair direction: {args_cli.stair_direction} ({key}).")
     if args_cli.rotate_video_env and not (args_cli.video and args_cli.dual_pane):
         raise ValueError("--rotate_video_env requires --video --dual_pane.")
     if args_cli.video and (args_cli.video_interval <= 0 or args_cli.video_length <= 0):

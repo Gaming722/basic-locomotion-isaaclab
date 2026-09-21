@@ -247,6 +247,55 @@ python scripts/dagger/train_dagger_go1.py \
   a metadata mismatch (`depth_image_size`, `depth_history_length`, `depth_delay_frames`) that
   still loads warns about an input-distribution shift.
 
+### Interactive IsaacLab play with keyboard
+
+Run with the IsaacLab Python environment and a visible Isaac Sim window (not the
+MuJoCo-only `sim2sim` environment):
+
+```bash
+python scripts/dagger/play_dagger_go1.py \
+  --policy logs/rsl_rl/rough_direct/<run>/dagger_raycaster_v3_ft2.pt
+```
+
+The play entry point uses the pure-student `--eval` path: it never loads the teacher,
+trains, or saves a checkpoint. It defaults to one RayCaster environment, real-time
+pacing, inverted pyramid stairs (walk outward from the low center to climb), and
+`--difficulty=0.4666666667`, corresponding to about 0.12 m step height. Press
+Up/Down for vx, Left/Right or A/D for vy, Q/E for yaw, V to stop, C for 0.4 m/s
+forward. Each key press changes the command by 0.1 and the bounds come from the
+student checkpoint's `command_a` (fallback: environment config). Click the Isaac
+Sim window first so it receives key events; close the window to stop.
+
+The commands persist across episode resets and are injected into the environment
+before observations are built. All existing depth history, delay, action clipping
+and filtering remain in the IsaacLab environment. You may override forwarded
+options, for example `--difficulty=0.667` for ~0.15 m steps,
+`--stair_direction=down`, or `--max_training_steps=2000` for a finite run.
+`--stair_direction` works only with `--eval --terrain stairs`; without it the
+usual mix of uphill/downhill stair terrains remains. The IsaacLab pyramid stairs
+are not geometrically identical to MuJoCo's straight stair course.
+
+### Play the teacher with the same keyboard controls
+
+The teacher uses its own heightmap observation and original PPO checkpoint, not
+the student's depth checkpoint. For a comparable 12 cm uphill staircase and the
+student's velocity-command range, run:
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task=Locomotion-Go1-Rough-Vision \
+  --checkpoint=logs/rsl_rl/rough_direct/<run>/model_99999.pt \
+  --num_envs=1 --terrain=stairs --difficulty=0.4666666667 \
+  --stair_direction=up --keyboard --keyboard_limits "0.8 0.4 0.8" --real-time
+```
+
+The key mapping is the same as student play. With `--keyboard`, Q/E control yaw,
+so the usual Q/E viewport env-switch bindings are disabled; number keys 1-9 can
+still switch the viewport's selected environment. Without `--keyboard_limits`,
+the teacher's environment `command_a` determines the limits (currently
+`[1.5, 0.8, 1.2]`), which exceeds the student's command range. The keyboard
+command persists through episode resets. Do not combine `--keyboard` and `--cmd`.
+
 
 ### Corrected depth encoding and history (introduced in version 2)
 

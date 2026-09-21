@@ -55,6 +55,13 @@ parser.add_argument(
     help="Fixed velocity command 'vx vy wz' for all envs (overrides the env's random command "
          "generator, e.g. --cmd \"0.5 0 0\" for constant forward).",
 )
+parser.add_argument("--keyboard", action="store_true", default=False,
+                    help="Use viewport keyboard velocity commands instead of random commands.")
+parser.add_argument("--keyboard_limits", type=str, default=None,
+                    help="Optional keyboard command bounds 'vx vy wz'; defaults to env command_a. "
+                         "Use '0.8 0.4 0.8' to match the GO1 depth student.")
+parser.add_argument("--stair_direction", choices=("up", "down"), default=None,
+                    help="With --terrain stairs, keep only inverted/uphill or regular/downhill stairs.")
 parser.add_argument(
     "--visualize_edge_map",
     action="store_true",
@@ -87,6 +94,9 @@ import os
 import time
 import torch
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "dagger"))
+from keyboard_control import install_isaac_keyboard_commands
+
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
 from isaaclab.envs import (
@@ -110,10 +120,11 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import basic_locomotion_isaaclab.tasks  # noqa: F401
 
 
-def _install_env_switch(env):
+def _install_env_switch(env, keyboard_mode=False):
     """Register keyboard shortcuts to switch which env the viewport camera follows.
 
-    E / Q = next / previous env, 1-9 = jump to env 0-8. Re-centres the camera on the
+    E / Q = next / previous env unless keyboard control uses them for yaw;
+    1-9 = jump to env 0-8. Re-centres the camera on the
     selected env via viewport_camera_controller.set_view_env_index. Only active when a
     display is present (local play); headless runs just warn.
     """
@@ -132,21 +143,25 @@ def _install_env_switch(env):
 
         def _on_key(event, *_):
             if event.type != carb.input.KeyboardEventType.KEY_PRESS:
-                return
+                return True
             name = event.input.name
             cur = controller.cfg.env_index
-            if name == "E":
+            if name == "E" and not keyboard_mode:
                 controller.set_view_env_index((cur + 1) % num_envs)
-            elif name == "Q":
+            elif name == "Q" and not keyboard_mode:
                 controller.set_view_env_index((cur - 1) % num_envs)
             elif name.isdigit() and 1 <= int(name) <= 9:
                 controller.set_view_env_index(int(name) - 1)
             else:
-                return
+                return True
             print(f"[INFO] camera -> env {controller.cfg.env_index}")
+            return True
 
         _input_iface.subscribe_to_keyboard_events(_keyboard, _on_key)
-        print("[INFO] env-switch keys on: E/Q = next/prev env, 1-9 = jump to env N-1.")
+        if keyboard_mode:
+            print("[INFO] env-switch keys on: 1-9 = jump to env N-1; Q/E control yaw.")
+        else:
+            print("[INFO] env-switch keys on: E/Q = next/prev env, 1-9 = jump to env N-1.")
     except Exception as e:  # headless / no window
         print(f"[WARN] env-switch keys unavailable ({e}).")
 
@@ -154,6 +169,14 @@ def _install_env_switch(env):
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with RSL-RL agent."""
+    if args_cli.keyboard and args_cli.headless:
+        raise ValueError("--keyboard requires a visible Isaac Sim window (omit --headless).")
+    if args_cli.keyboard and args_cli.cmd:
+        raise ValueError("Use --keyboard or --cmd, not both.")
+    if args_cli.keyboard_limits and not args_cli.keyboard:
+        raise ValueError("--keyboard_limits requires --keyboard.")
+    if args_cli.stair_direction and args_cli.terrain != "stairs":
+        raise ValueError("--stair_direction requires --terrain stairs.")
     # grab task name for checkpoint path
     task_name = args_cli.task.split(":")[-1]
     train_task_name = task_name.replace("-Play", "")
@@ -173,6 +196,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             env_cfg.difficulty = args_cli.difficulty
         env_cfg.rebuild_terrain()
         print(f"[INFO] Play terrain: {env_cfg.terrain_type} difficulty={env_cfg.difficulty}")
+        if args_cli.stair_direction:
+            key = "pyramid_stairs_inv" if args_cli.stair_direction == "up" else "pyramid_stairs"
+            stair_cfg = env_cfg.terrain.terrain_generator.sub_terrains[key]
+            stair_cfg.proportion = 1.0
+            env_cfg.terrain.terrain_generator.sub_terrains = {key: stair_cfg}
+            print(f"[INFO] Stair direction: {args_cli.stair_direction} ({key}).")
 
     # visualize the feet_edge reward edge map (black = edge, white = feasible) if requested
     if args_cli.visualize_edge_map:
@@ -229,10 +258,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     # interactive viewport camera: switch which env is followed (E/Q, 1-9)
-    _install_env_switch(env)
+    _install_env_switch(env, keyboard_mode=args_cli.keyboard)
 
     # fixed velocity command for all envs if requested (replaces the random generator)
-    if args_cli.cmd:
+    keyboard_subscription = None
+    if args_cli.keyboard:
+        if args_cli.keyboard_limits:
+            try:
+                amplitudes = [float(value) for value in args_cli.keyboard_limits.split()]
+            except ValueError as exc:
+                raise ValueError("--keyboard_limits must be 'vx vy wz'.") from exc
+        else:
+            amplitudes = env.unwrapped.cfg.command_a
+        keyboard_subscription = install_isaac_keyboard_commands(env, amplitudes)
+    elif args_cli.cmd:
         try:
             _vx, _vy, _wz = (float(x) for x in args_cli.cmd.split())
         except ValueError:
