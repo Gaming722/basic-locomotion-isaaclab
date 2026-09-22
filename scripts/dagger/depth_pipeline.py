@@ -50,3 +50,9 @@ def depth_sequence_from_history(history, newest_index, sequence_length, env_indi
     if env_indices is not None:
         history = history.index_select(1, env_indices.to(history.device))
     return history.index_select(0, indices).permute(1, 0, 2, 3, 4).contiguous()
+
+
+def student_depth_grayscale(depth):
+    """Display a processed depth frame with the student's near=white, far=black palette."""
+    depth = depth.float().clamp(0.1, 2.0)
+    return ((1.0 - (depth - 0.1) / 1.9) * 255.0).to(torch.uint8).cpu().numpy()

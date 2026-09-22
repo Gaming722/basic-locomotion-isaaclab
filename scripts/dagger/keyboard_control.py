@@ -3,6 +3,13 @@
 import math
 
 
+def zero_teacher_heightmap(policy_obs, num_rays):
+    """Zero only the trailing terrain-height block of a GO1 teacher observation."""
+    if num_rays <= 0 or num_rays > policy_obs.shape[-1]:
+        raise ValueError("Invalid heightmap width for the teacher observation.")
+    policy_obs[..., -num_rays:] = 0.0
+
+
 class KeyboardVelocityCommand:
     """Hold one bounded command for every simulated environment."""
 
@@ -12,6 +19,7 @@ class KeyboardVelocityCommand:
         self.limits = tuple(float(v) for v in amplitudes)
         self.step = step
         self.values = [0.0, 0.0, 0.0]
+        self.sensor_blind = False
 
     def on_key(self, name):
         """Return True if the key changed or explicitly reset the command."""
@@ -29,6 +37,8 @@ class KeyboardVelocityCommand:
             self.values[:] = [0.0, 0.0, 0.0]
         elif name == "C":
             self.values[:] = [min(0.4, self.limits[0]), 0.0, 0.0]
+        elif name == "B":
+            self.sensor_blind = not self.sensor_blind
         else:
             return False
         return True
@@ -41,7 +51,7 @@ class KeyboardVelocityCommand:
             command_buffer[env_ids, :3] = value
 
 
-def install_isaac_keyboard_commands(env, amplitudes):
+def install_isaac_keyboard_commands(env, amplitudes, *, sensor_name="depth"):
     """Override GO1 command resampling and register viewport key presses."""
     if not hasattr(env.unwrapped, "_commands"):
         raise RuntimeError("Keyboard play requires an environment with a _commands buffer.")
@@ -65,7 +75,10 @@ def install_isaac_keyboard_commands(env, amplitudes):
     def _on_key(event, *_):
         if event.type != carb.input.KeyboardEventType.KEY_PRESS:
             return True
-        if controller.on_key(event.input.name):
+        if event.input.name == "B":
+            controller.on_key("B")
+            print(f"[SENSOR] {sensor_name} input {'ZERO' if controller.sensor_blind else 'RESTORED'}", flush=True)
+        elif controller.on_key(event.input.name):
             print(f"[CMD] vx={controller.values[0]:+.2f} "
                   f"vy={controller.values[1]:+.2f} wz={controller.values[2]:+.2f}", flush=True)
         return True
@@ -73,6 +86,6 @@ def install_isaac_keyboard_commands(env, amplitudes):
     subscription = input_iface.subscribe_to_keyboard_events(keyboard, _on_key)
     print(f"[INFO] Keyboard commands enabled, limits={controller.limits}: "
           "Up/Down=vx, Left/Right or A/D=vy, Q/E=wz, V=stop, C=0.4 cruise. "
-          "Click the Isaac Sim window for focus.")
+          f"B=toggle zero {sensor_name} input. Click the Isaac Sim window for focus.")
     # Keep both the callback and subscription alive for the play loop.
     return input_iface, keyboard, subscription, controller

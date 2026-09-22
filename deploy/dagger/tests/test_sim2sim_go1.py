@@ -38,6 +38,10 @@ class Sim2SimTests(unittest.TestCase):
             self.assertEqual([ctl[k] for k in ('vx', 'vy', 'wz')], [0, 0, 0])
             callback(256)
             self.assertTrue(ctl['quit'])
+            callback(66)
+            self.assertTrue(ctl['sensor_blind'])
+            callback(66)
+            self.assertFalse(ctl['sensor_blind'])
 
     def test_realtime_deadline(self):
         with patch('play_mujoco_dagger_go1.time.perf_counter', return_value=10.005), \

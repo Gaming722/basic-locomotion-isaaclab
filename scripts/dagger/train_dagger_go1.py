@@ -209,6 +209,10 @@ parser.add_argument(
          "Requires a visible Isaac Sim window.",
 )
 parser.add_argument(
+    "--show_depth", action="store_true", default=False,
+    help="During visible --eval, open a live window showing the latest delayed depth frame fed to the student.",
+)
+parser.add_argument(
     "--eval_policy",
     type=str,
     default=None,
@@ -281,14 +285,15 @@ from basic_locomotion_isaaclab.assets.d435_geometry import (
 from basic_locomotion_isaaclab.tasks.custom_events import get_num_fixed_command_envs
 from dagger_network import DaggerNet, DaggerReplayBuffer
 from keyboard_control import install_isaac_keyboard_commands
-from depth_pipeline import PIPELINE_VERSION, preprocess_depth, depth_sequence_from_history
+from depth_pipeline import PIPELINE_VERSION, preprocess_depth, depth_sequence_from_history, student_depth_grayscale
+from depth_preview import IsaacDepthPreview
 from video_follow import rotating_video_env
 
 import isaaclab.utils.math as math_utils
 from isaacsim.core.utils.viewports import set_camera_view
 
 
-def _sanitize_depth_data(env: RslRlVecEnvWrapper) -> torch.Tensor:
+def _sanitize_depth_data(env: RslRlVecEnvWrapper, *, zero_depth: bool = False) -> torch.Tensor:
     if not hasattr(env.unwrapped, "_depth_camera"):
         raise RuntimeError("DAgger requires a depth-enabled student task (Tiled or RayCaster).")
     depth = env.unwrapped._depth_camera.data.output["distance_to_image_plane"]
@@ -298,7 +303,10 @@ def _sanitize_depth_data(env: RslRlVecEnvWrapper) -> torch.Tensor:
         additive_noise_std=args_cli.depth_additive_noise_std,
         dropout_prob=args_cli.depth_dropout_prob, min_z=args_cli.depth_min_z,
     )
+    if zero_depth:
+        processed.zero_()
     env.unwrapped._dagger_processed_depth = processed
+    env.unwrapped._dagger_force_zero_depth = zero_depth
     return processed
 
 
@@ -345,6 +353,7 @@ def _predict_student_actions_chunked(
     common_obs: torch.Tensor,
     env_indices_cpu: torch.Tensor | None,
     device: torch.device | str,
+    zero_depth: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     if env_indices_cpu is None:
         total_count = common_obs.shape[0]
@@ -368,6 +377,8 @@ def _predict_student_actions_chunked(
             env_indices=chunk_indices_cpu,
         )
         chunk_depth = chunk_depth_cpu.to(device=device, dtype=torch.float32, non_blocking=True)
+        if zero_depth:
+            chunk_depth.zero_()
         chunk_indices_gpu = chunk_indices_cpu.to(device=device)
         chunk_common_obs = common_obs.index_select(0, chunk_indices_gpu)
 
@@ -429,7 +440,7 @@ def _dual_pane_frame(env, env_index=600, depth_range=(0.2, 5.0), student_depth=F
     """
     sim_frame = env.unwrapped.render()
     sim_bgr = cv2.cvtColor(sim_frame, cv2.COLOR_RGB2BGR)
-    if student_depth:
+    if student_depth or getattr(env.unwrapped, "_dagger_force_zero_depth", False):
         # Student obs input: _sanitize_depth_data clips to [0.1, 2.0], invalid/no-hit -> 2.0.
         # Reuse the captured frame; a preview must not sample fresh sensor noise.
         d = env.unwrapped._dagger_processed_depth[env_index, 0].float()
@@ -588,6 +599,7 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
             env, ckpt.get("metadata", {}).get("command_a", env.unwrapped.cfg.command_a))
     elif args_cli.cmd:
         _install_fixed_command(env)
+    keyboard_controller = keyboard_subscription[3] if keyboard_subscription is not None else None
 
     obs = env.get_observations()
     current_depth_cpu = _sanitize_depth_data(env).detach().to(device="cpu", dtype=torch.float16)
@@ -636,11 +648,23 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
         f"video={'dual-pane' if (args_cli.video and args_cli.dual_pane) else ('rgb' if args_cli.video else 'off')})."
     )
 
+    depth_preview = None
+    if args_cli.show_depth:
+        depth_preview = IsaacDepthPreview(current_depth_cpu.shape[-1], current_depth_cpu.shape[-2])
+        print(f"[INFO] Live depth preview: env={follow_env}, latest frame in actor's delayed depth history "
+              "(near=white, far=black). Click the Isaac Sim window for keyboard commands.")
+
     step = 0
     while simulation_app.is_running() and (max_steps is None or step < max_steps):
         start_time = time.time()
         common_obs = obs["common"]
         newest_index = _delayed_newest_index(history_index, history_capacity)
+        if depth_preview is not None:
+            preview_depth = depth_history[newest_index, follow_env, 0]
+            if keyboard_controller is not None and keyboard_controller.sensor_blind:
+                preview_depth = torch.zeros_like(preview_depth)
+            gray = student_depth_grayscale(preview_depth)
+            depth_preview.update(gray)
 
         # All envs are controlled by the student (env_indices_cpu=None) -- the same code path as
         # the training loop's beta<=0 branch (training L715-724).
@@ -651,12 +675,15 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
             common_obs=common_obs,
             env_indices_cpu=None,
             device=device,
+            zero_depth=keyboard_controller.sensor_blind if keyboard_controller is not None else False,
         )
 
         obs, _, dones, _ = env.step(student_actions)
         dones_cpu = dones.bool().to(device="cpu")
         # Match the original DAgger: read sensor data and append a snapshot each control step.
-        current_depth_cpu = _sanitize_depth_data(env).detach().to(device="cpu", dtype=torch.float16)
+        current_depth_cpu = _sanitize_depth_data(
+            env, zero_depth=keyboard_controller.sensor_blind if keyboard_controller is not None else False
+        ).detach().to(device="cpu", dtype=torch.float16)
         history_index = (history_index + 1) % history_capacity
         depth_history[history_index].copy_(current_depth_cpu)
         if dones_cpu.any():
@@ -708,6 +735,8 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
         sleep_time = env.unwrapped.step_dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+    if depth_preview is not None:
+        depth_preview.close()
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -715,6 +744,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     """Train a depth-conditioned student with online DAgger supervision."""
     if args_cli.keyboard and not args_cli.eval:
         raise ValueError("--keyboard is only available with --eval.")
+    if args_cli.show_depth and (not args_cli.eval or args_cli.headless):
+        raise ValueError("--show_depth requires visible --eval (omit --headless).")
     if args_cli.stair_direction and (not args_cli.eval or args_cli.terrain != "stairs"):
         raise ValueError("--stair_direction requires --eval --terrain stairs.")
     # grab task name for checkpoint path
@@ -729,6 +760,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg.obs_groups = {"policy": ["teacher_obs"], "critic": ["teacher_obs"]}
 
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    if args_cli.eval:
+        env_cfg.disable_episode_timeout = True
+        print("[INFO] Student play: 20-second episode timeout disabled; contact termination remains active.")
     env_cfg.terrain_type = args_cli.terrain
     if args_cli.difficulty is not None and not 0.0 <= args_cli.difficulty <= 1.0:
         raise ValueError(f"--difficulty must be in [0.0, 1.0], got {args_cli.difficulty}")

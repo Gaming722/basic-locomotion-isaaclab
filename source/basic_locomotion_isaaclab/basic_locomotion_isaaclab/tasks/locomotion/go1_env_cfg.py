@@ -126,6 +126,9 @@ class EventCfg:
 class Go1FlatEnvCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 20.0
+    # Pure play/evaluation may disable time-based resets while retaining contact termination.
+    # Training keeps the original 20-second episode horizon by default.
+    disable_episode_timeout: bool = False
     terrain_curriculum_move_up_error_percent = 25.0
     terrain_curriculum_move_down_error_percent = 50.0
     decimation = 5   # 5 physics substeps per control step (0.02 s / 0.004 s), matches mujoco_playground GO1

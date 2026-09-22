@@ -549,6 +549,8 @@ class LocomotionEnv(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
+        if getattr(self.cfg, "disable_episode_timeout", False):
+            time_out = torch.zeros_like(time_out)
         if getattr(self.cfg, "mj_termination", False):
             # mujoco_playground go1 joystick termination: die only when the base is
             # flipped past 90 deg (upvector z < 0 <=> projected gravity z > 0). Lets the
@@ -592,7 +594,7 @@ class LocomotionEnv(DirectRLEnv):
 
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
-        if len(env_ids) == self.num_envs: 
+        if len(env_ids) == self.num_envs and not getattr(self.cfg, "disable_episode_timeout", False):
             # Spread out the resets to avoid spikes in training when many environments reset at a similar time
             self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
         

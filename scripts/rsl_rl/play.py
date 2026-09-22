@@ -95,7 +95,7 @@ import time
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "dagger"))
-from keyboard_control import install_isaac_keyboard_commands
+from keyboard_control import install_isaac_keyboard_commands, zero_teacher_heightmap
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
@@ -184,6 +184,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     agent_cfg: RslRlBaseRunnerCfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    if hasattr(env_cfg, "disable_episode_timeout"):
+        env_cfg.disable_episode_timeout = True
+        print("[INFO] Go1 play: 20-second episode timeout disabled; contact termination remains active.")
 
     # clamp the viewer env_index to the actual number of envs (config may default to 500)
     if hasattr(env_cfg, "viewer"):
@@ -270,7 +273,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 raise ValueError("--keyboard_limits must be 'vx vy wz'.") from exc
         else:
             amplitudes = env.unwrapped.cfg.command_a
-        keyboard_subscription = install_isaac_keyboard_commands(env, amplitudes)
+        keyboard_subscription = install_isaac_keyboard_commands(env, amplitudes, sensor_name="heightmap")
     elif args_cli.cmd:
         try:
             _vx, _vy, _wz = (float(x) for x in args_cli.cmd.split())
@@ -328,6 +331,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # reset environment
     obs = env.get_observations()
+    keyboard_controller = keyboard_subscription[3] if keyboard_subscription is not None else None
+    heightmap_rays = None
+    if keyboard_controller is not None:
+        scanner = getattr(env.unwrapped, "_perceptive_height_scanner", None)
+        if scanner is not None:
+            heightmap_rays = scanner.data.ray_hits_w.shape[-2]
+        else:
+            print("[WARN] This policy has no heightmap observation; B has no perceptual input to zero.")
     if args_cli.cmd and hasattr(env.unwrapped, "_commands"):
         print(f"[INFO] actual commands[:3] = {env.unwrapped._commands[:3].cpu().numpy().tolist()}")
     timestep = 0
@@ -336,6 +347,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         start_time = time.time()
         # run everything in inference mode
         with torch.inference_mode():
+            if keyboard_controller is not None and keyboard_controller.sensor_blind and heightmap_rays is not None:
+                # The teacher has no depth image. Its actor's final observation block is
+                # the privileged terrain heightmap; leave proprioception untouched.
+                zero_teacher_heightmap(obs["policy"], heightmap_rays)
             # agent stepping
             actions = policy(obs)
             # env stepping

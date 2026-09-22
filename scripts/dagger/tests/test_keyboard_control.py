@@ -9,11 +9,17 @@ from unittest import mock
 import torch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from keyboard_control import KeyboardVelocityCommand, install_isaac_keyboard_commands
+from keyboard_control import KeyboardVelocityCommand, install_isaac_keyboard_commands, zero_teacher_heightmap
 from play_dagger_go1 import eval_command
 
 
 class KeyboardCommandTests(unittest.TestCase):
+    def test_zero_teacher_heightmap_preserves_proprioception(self):
+        obs = torch.arange(12, dtype=torch.float32).reshape(2, 6)
+        zero_teacher_heightmap(obs, 2)
+        torch.testing.assert_close(obs[:, :4], torch.tensor([[0., 1., 2., 3.], [6., 7., 8., 9.]]))
+        torch.testing.assert_close(obs[:, 4:], torch.zeros((2, 2)))
+
     def test_bounds_stop_and_cruise(self):
         controller = KeyboardVelocityCommand((0.8, 0.4, 0.8))
         for positive, negative, axis, limit in (
@@ -32,6 +38,11 @@ class KeyboardCommandTests(unittest.TestCase):
         self.assertEqual(controller.values, [0.4, 0., 0.])
         controller.on_key("V")
         self.assertEqual(controller.values, [0., 0., 0.])
+        self.assertFalse(controller.sensor_blind)
+        controller.on_key("B")
+        self.assertTrue(controller.sensor_blind)
+        controller.on_key("B")
+        self.assertFalse(controller.sensor_blind)
 
     def test_apply_to_all_and_reset_subset(self):
         controller = KeyboardVelocityCommand((.8, .4, .8))
@@ -74,10 +85,12 @@ class KeyboardCommandTests(unittest.TestCase):
             "basic_locomotion_isaaclab.tasks.custom_events": events,
         }
         with mock.patch.dict(sys.modules, modules):
-            install_isaac_keyboard_commands(env, (0.8, 0.4, 0.8))
+            controller = install_isaac_keyboard_commands(env, (0.8, 0.4, 0.8))[3]
             self.assertEqual(len(callbacks), 1)
             event = lambda name, kind: types.SimpleNamespace(type=kind, input=types.SimpleNamespace(name=name))
             self.assertIs(callbacks[0](event("UP", 1)), True)
+            self.assertIs(callbacks[0](event("B", 1)), True)
+            self.assertTrue(controller.sensor_blind)
             self.assertIs(callbacks[0](event("UP", 2)), True)
             self.assertIs(callbacks[0](event("UNKNOWN", 1)), True)
             events._get_new_random_commands(env_obj)
@@ -87,12 +100,16 @@ class KeyboardCommandTests(unittest.TestCase):
         command = eval_command(["--policy", "student.pt", "--difficulty=0.6"])
         self.assertIn("--eval", command)
         self.assertIn("--keyboard", command)
+        self.assertIn("--show_depth", command)
         self.assertIn("--stair_direction=up", command)
         self.assertIn("--eval_policy=student.pt", command)
         self.assertEqual(command[-1], "--difficulty=0.6")
         flat = eval_command(["--policy", "student.pt", "--terrain", "flat"])
         self.assertIn("--terrain=flat", flat)
         self.assertFalse(any(arg.startswith("--stair_direction") for arg in flat))
+        hidden = eval_command(["--policy", "student.pt", "--no_depth_window"])
+        self.assertNotIn("--show_depth", hidden)
+        self.assertNotIn("--no_depth_window", hidden)
 
 
 if __name__ == "__main__":

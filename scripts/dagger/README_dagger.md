@@ -260,11 +260,24 @@ python scripts/dagger/play_dagger_go1.py \
 The play entry point uses the pure-student `--eval` path: it never loads the teacher,
 trains, or saves a checkpoint. It defaults to one RayCaster environment, real-time
 pacing, inverted pyramid stairs (walk outward from the low center to climb), and
-`--difficulty=0.4666666667`, corresponding to about 0.12 m step height. Press
-Up/Down for vx, Left/Right or A/D for vy, Q/E for yaw, V to stop, C for 0.4 m/s
+`--difficulty=0.4666666667`, corresponding to about 0.12 m step height.
+The 20-second episode timeout is disabled in student play, so a healthy rollout
+continues until the window closes; base/hip contact can still terminate and reset it.
+Press Up/Down for vx, Left/Right or A/D for vy, Q/E for yaw, V to stop, C for 0.4 m/s
 forward. Each key press changes the command by 0.1 and the bounds come from the
 student checkpoint's `command_a` (fallback: environment config). Click the Isaac
 Sim window first so it receives key events; close the window to stop.
+The play entry point also opens an Isaac Sim UI depth panel by default (no OpenCV
+HighGUI dependency). It shows
+the latest preprocessed **delayed** frame in the actor's depth history, enlarged
+4× for display only (the policy still receives 106×60). The actor receives the
+full 5-frame sequence, not just this displayed frame. Click the Isaac Sim
+viewport to use the movement keys; pass `--no_depth_window` to hide the preview.
+Press `B` to toggle camera failure: the actor receives an all-zero depth tensor,
+new history frames become zero, and the depth preview turns white under the
+existing near=white grayscale palette. Press `B` again to restore the camera;
+the history refills over the following control steps. This deliberately tests an
+out-of-distribution hard failure, not the usual invalid-depth-to-far preprocessing.
 
 The commands persist across episode resets and are injected into the environment
 before observations are built. All existing depth history, delay, action clipping
@@ -289,12 +302,18 @@ python scripts/rsl_rl/play.py \
   --stair_direction=up --keyboard --keyboard_limits "0.8 0.4 0.8" --real-time
 ```
 
+Its 20-second episode timeout is also disabled during Go1 play; contact-based
+termination remains active.
+
 The key mapping is the same as student play. With `--keyboard`, Q/E control yaw,
 so the usual Q/E viewport env-switch bindings are disabled; number keys 1-9 can
 still switch the viewport's selected environment. Without `--keyboard_limits`,
 the teacher's environment `command_a` determines the limits (currently
 `[1.5, 0.8, 1.2]`), which exceeds the student's command range. The keyboard
 command persists through episode resets. Do not combine `--keyboard` and `--cmd`.
+Press `B` to zero the teacher actor's privileged heightmap block (not a depth
+image; this teacher has no depth input). Proprioception and velocity commands
+remain intact. Press `B` again to restore the heightmap.
 
 
 ### Corrected depth encoding and history (introduced in version 2)

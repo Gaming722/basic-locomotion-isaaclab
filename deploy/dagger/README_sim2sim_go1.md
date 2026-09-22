@@ -20,7 +20,7 @@ python deploy/dagger/play_mujoco_dagger_go1.py \
 - **Tiled / RayCaster 通用**：从 checkpoint 读取分辨率、完整内参 K 和 ROS optical 外参，转换到 MuJoCo/OpenGL 相机坐标系。相机位置是深度光心，不是安装螺孔；旧 checkpoint 缺少标定时会告警并使用当前名义标定。
 - `--viewer` 需要显示；headless 用 EGL（`MUJOCO_GL=egl`，默认）。
 - `--viewer` 默认按真实时间限速（目标 1×），headless 不限速。计算/渲染太慢时仍会慢于实时，不修改物理步长或跳过控制步。
-- 键盘：`Up/Down`=vx、`Left/Right`(+A/D)=vy、`Q/E`=wz（每次 ±0.1）、`V`=停止、`C`=巡航(0.4,0,0)、`ESC`=退出。
+- 键盘：`Up/Down`=vx、`Left/Right`(+A/D)=vy、`Q/E`=wz（每次 ±0.1）、`V`=停止、`C`=巡航(0.4,0,0)、`B`=深度全零/恢复、`ESC`=退出。`B` 开启时 actor 立即收到全零深度，后续历史帧也写零；恢复后历史逐步填满。预览按原有近白远黑映射呈白色。这是超出正常预处理分布的硬失能测试，不代表真实设备失效时的全部行为。
 - 键盘范围读取学生 checkpoint 的 `command_a`，缺失时告警并使用 ±(0.8,0.4,0.8)。巡航及 viewer 初始 `--cmd` 也限制在该范围内；headless 的显式 `--cmd` 保持不裁剪。
 - 默认录双窗视频到 `<ckpt目录>/videos/dagger_play/mj_sim2sim_go1_<checkpoint名>.mp4`；`--no_video` 跳过。
 

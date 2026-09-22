@@ -299,6 +299,9 @@ def _make_key_callback(ctl, command_a):
             ctl["vx"] = ctl["vy"] = ctl["wz"] = 0.0
         elif keycode == 67:                      # C -> cruise
             ctl["vx"], ctl["vy"], ctl["wz"] = min(0.4, vx_max), 0.0, 0.0
+        elif keycode == 66:                      # B -> camera failure / recovery
+            ctl["sensor_blind"] = not ctl.get("sensor_blind", False)
+            print(f"[SENSOR] depth input {'ZERO' if ctl['sensor_blind'] else 'RESTORED'}", flush=True)
     return key_callback
 
 
@@ -334,7 +337,8 @@ def main():
     parser.add_argument("--perlin_amp", type=float, default=0.18, help="perlin amplitude (m)")
     parser.add_argument("--viewer", action="store_true",
                         help="open an interactive mujoco viewer + live depth window (needs a display). "
-                             "Keys: Up/Down=vx Left/Right(+A/D)=vy Q/E=wz (+-0.1/press), V=stop C=cruise ESC=quit")
+                             "Keys: Up/Down=vx Left/Right(+A/D)=vy Q/E=wz (+-0.1/press), "
+                             "V=stop C=cruise B=toggle zero depth ESC=quit")
     parser.add_argument("--cmd", default="0.0 0.0 0.0",
                         help="fixed velocity command 'vx vy wz' for headless runs (default 0 0 0); "
                              "with --viewer the keyboard overrides it")
@@ -523,7 +527,8 @@ def main():
         viewer.cam.elevation = -18.0
         cv2.namedWindow("depth", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("depth", 480, 280)
-        print("[INFO] viewer on: Up/Down=vx Left/Right(+A/D)=vy Q/E=wz V=stop C=cruise ESC=quit.")
+        print("[INFO] viewer on: Up/Down=vx Left/Right(+A/D)=vy Q/E=wz V=stop "
+              "C=cruise B=toggle zero depth ESC=quit.")
 
     # --- optional dual-pane video ---
     recording = not args.no_video
@@ -573,11 +578,14 @@ def main():
         obs_hist = np.roll(obs_hist, -1, axis=0)
         obs_hist[-1] = obs1
 
-        depth_t = _preprocess_depth(
-            cam.render(), blur_sigma, device, min_z=float(md.get("depth_min_z", 0.0)),
-            additive_noise_std=float(md.get("depth_sensor_noise", {}).get("additive_noise_std", 0.0)),
-            dropout_prob=float(md.get("depth_sensor_noise", {}).get("dropout_prob", 0.0)),
-        )
+        if ctl.get("sensor_blind", False):
+            depth_t = torch.zeros((1, 1, depth_h, depth_w), dtype=torch.float32, device=device)
+        else:
+            depth_t = _preprocess_depth(
+                cam.render(), blur_sigma, device, min_z=float(md.get("depth_min_z", 0.0)),
+                additive_noise_std=float(md.get("depth_sensor_noise", {}).get("additive_noise_std", 0.0)),
+                dropout_prob=float(md.get("depth_sensor_noise", {}).get("dropout_prob", 0.0)),
+            )
         frame = depth_t.squeeze(0).squeeze(0).numpy().astype(np.float16)
         if p == 0:
             hist[:] = frame
@@ -618,6 +626,8 @@ def main():
             writer.write(frame)
 
         seq = torch.from_numpy(seq)[None].float().contiguous()   # (1, depth_len, 1, H, W)
+        if ctl.get("sensor_blind", False):
+            seq.zero_()  # immediate actor failure; zero frames also persist in the history
         common = torch.from_numpy(obs_hist.reshape(1, -1)).float()
         with torch.no_grad():
             actions, _ = net(seq, common, hidden=None)
