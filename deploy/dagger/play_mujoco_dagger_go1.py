@@ -22,6 +22,7 @@ else:
     os.environ.setdefault("MUJOCO_EGL_DEVICE_ID", "0")
 
 import argparse
+import json
 import math
 import re
 import time
@@ -40,6 +41,11 @@ sys.path.insert(0, os.path.join(REPO, "scripts", "dagger"))
 from mujoco_depth import MujocoDepthCamera
 from dagger_network import DaggerNet
 from depth_pipeline import preprocess_depth
+from go1_deploy_core import (COMMAND_LIMIT, DEFAULT_JOINT, DAMPING, PASSIVE,
+                             POLICY_JOINT_NAMES, RL, SDK_JOINT_NAMES,
+                             SDK_VELOCITY_LIMIT, SITDOWN, STAND,
+                             DeploymentCore, StateMachine, core_sha256,
+                             sdk_position_limit, sdk_to_policy, verify_bundle)
 sys.path.insert(0, os.path.join(REPO, "source", "basic_locomotion_isaaclab",
                               "basic_locomotion_isaaclab", "assets"))
 from d435_geometry import D435_DEPTH_POSITION_BASE, D435_MOUNT_PITCH_DEG, D435_DEPTH_QUATERNION_ROS_WXYZ
@@ -48,12 +54,12 @@ GO1_XML = os.path.join(REPO, "deploy", "mujoco_models", "go1", "go1.xml")
 
 # Policy action/joint order (matches Go1FlatEnvCfg.desired_joints_order):
 # hip block, thigh block, calf block, each FL/FR/RL/RR.
-DESIRED_ORDER = [
-    "FL_hip_joint", "FR_hip_joint", "RL_hip_joint", "RR_hip_joint",
-    "FL_thigh_joint", "FR_thigh_joint", "RL_thigh_joint", "RR_thigh_joint",
-    "FL_calf_joint", "FR_calf_joint", "RL_calf_joint", "RR_calf_joint",
-]
-DEFAULT_JOINT = np.array([0.0] * 4 + [0.9] * 4 + [-1.8] * 4)  # GO1 home pose
+DESIRED_ORDER = list(POLICY_JOINT_NAMES)
+SDK_ORDER = list(SDK_JOINT_NAMES)
+# Official Go1 URDF velocity limits, in Unitree SDK joint order.  MuJoCo does
+# not impose these as hard constraints, so report violations explicitly before
+# transferring a controller to hardware.
+GO1_VELOCITY_LIMIT_SDK = SDK_VELOCITY_LIMIT
 
 # GO1 training defaults (fallback if params/env.yaml is missing).
 GO1_DEFAULTS = dict(action_scale=0.5, clip_actions=3.0, use_filter=True,
@@ -80,7 +86,8 @@ GO1_MAX_DELAY = 2
 
 # --- XML building (m1-style: extract inner, absolute meshdir, inject terrain+camera) ----
 
-def _go1_xml_inner(kp: float = 35.0, kd: float = 0.5, armature: float = 0.01):
+def _go1_xml_inner(kp: float = 35.0, kd: float = 0.5, armature: float = 0.01,
+                   torque_control: bool = False):
     """Return GO1 XML with training gains and unclamped position targets."""
     with open(GO1_XML) as source:
         txt = source.read()
@@ -97,10 +104,18 @@ def _go1_xml_inner(kp: float = 35.0, kd: float = 0.5, armature: float = 0.01):
         joint.set('armature', str(armature))
         joint.set('frictionloss', '0')
     for actuator in root.findall('.//default/position'):
-        if 'kp' in actuator.attrib:
-            actuator.set('kp', str(kp))
-        # IsaacLab clips raw actions, not the resulting position targets.
-        actuator.set('ctrllimited', 'false')
+        if torque_control:
+            actuator.tag = 'motor'
+            actuator.attrib.pop('kp', None)
+            actuator.attrib.pop('ctrlrange', None)
+        else:
+            if 'kp' in actuator.attrib:
+                actuator.set('kp', str(kp))
+            # IsaacLab clips raw actions, not the resulting position targets.
+            actuator.set('ctrllimited', 'false')
+    if torque_control:
+        for actuator in root.findall('.//actuator/position'):
+            actuator.tag = 'motor'
     inner = ''.join(ET.tostring(child, encoding='unicode') for child in root)
     return inner
 
@@ -132,6 +147,31 @@ def _sync_realtime(wall_start, sim_elapsed):
         time.sleep(remaining)
 
 
+def _parse_fsm_script(value):
+    allowed = {name: name for name in (PASSIVE, DAMPING, STAND, SITDOWN, RL)}
+    events = []
+    for item in value.split(','):
+        try:
+            at, mode = item.split(':', 1)
+            at = float(at)
+            mode = mode.strip().upper()
+        except ValueError as error:
+            raise ValueError("FSM script must be 'seconds:MODE,...'") from error
+        if not np.isfinite(at) or at < 0 or mode not in allowed:
+            raise ValueError(f"invalid FSM event: {item}")
+        events.append([at, allowed[mode]])
+    if any(events[i][0] >= events[i + 1][0] for i in range(len(events) - 1)):
+        raise ValueError("FSM event times must be strictly increasing")
+    return events
+
+
+def _roll_pitch(quat_wxyz):
+    w, x, y, z = quat_wxyz
+    roll = math.atan2(2 * (w*x + y*z), 1 - 2 * (x*x + y*y))
+    pitch = math.asin(np.clip(2 * (w*y - z*x), -1.0, 1.0))
+    return roll, pitch
+
+
 def _camera_quat():
     """Orthogonal camera frame quat (image-up = world-up projected onto the plane
     perpendicular to the 30-deg-down look axis); avoids a skewed depth image."""
@@ -149,9 +189,11 @@ def _camera_quat():
 def build_go1_scene_xml(scene="flat", step_rise=0.12, step_tread=0.30, n_steps=12,
                         width=6.0, perlin_amp=0.18, kp=35.0, kd=0.5, armature=0.01,
                         camera_position=CAM_POS, camera_quaternion=None,
-                        camera_intrinsics=None, camera_size=(DEPTH_H, DEPTH_W)):
+                        camera_intrinsics=None, camera_size=(DEPTH_H, DEPTH_W),
+                        torque_control=False):
     """Compose a scene XML: go1 robot + terrain + baked depth camera."""
-    inner = _go1_xml_inner(kp=kp, kd=kd, armature=armature)
+    inner = _go1_xml_inner(kp=kp, kd=0.0 if torque_control else kd,
+                           armature=armature, torque_control=torque_control)
     cam_q = " ".join(f"{v:.6f}" for v in (_camera_quat() if camera_quaternion is None else camera_quaternion))
 
     assets = (
@@ -277,25 +319,47 @@ def _projected_gravity(quat_wxyz):
     return (a - b + c).numpy().flatten()
 
 
-def _make_key_callback(ctl, command_a):
-    """Keyboard commands bounded by the student's training amplitudes."""
+def _make_key_callback(ctl, command_a, fsm=False):
+    """Keyboard commands bounded by the student's training amplitudes.
+
+    This intentionally follows the original sim2sim mapping.  W and R are not
+    used because MuJoCo assigns them to wireframe and reload.  Left/Right also
+    reach the viewer's history-step binding, but that is inert in passive mode.
+    """
     vx_max, vy_max, wz_max = command_a
     def key_callback(keycode):
-        if keycode == 256:                       # ESC
+        if fsm and keycode in (256, 32):         # ESC/Space -> DAMPING
+            ctl["request"] = DAMPING
+            ctl["rl_enabled"] = False
+        elif keycode == 256:                     # ESC -> quit outside FSM
             ctl["quit"] = True
+        elif fsm and keycode == 88:              # X -> quit
+            ctl["quit"] = True
+        elif fsm and keycode == 48:              # 0 -> PASSIVE
+            ctl["request"] = PASSIVE
+            ctl["rl_enabled"] = False
+        elif fsm and keycode == 49:              # 1 -> STAND
+            ctl["request"] = STAND
+            ctl["rl_enabled"] = False
+        elif fsm and keycode == 50:              # 2 -> SITDOWN
+            ctl["request"] = SITDOWN
+            ctl["rl_enabled"] = False
+        elif fsm and keycode == 51:              # 3 -> RL
+            ctl["request"] = RL
+            ctl["rl_enabled"] = True
         elif keycode == 265:                     # Up -> vx +0.1
             ctl["vx"] = min(ctl["vx"] + 0.1, vx_max)
         elif keycode == 264:                     # Down -> vx -0.1
             ctl["vx"] = max(ctl["vx"] - 0.1, -vx_max)
-        elif keycode in (263, 65):               # Left / A -> vy +0.1
+        elif keycode == 263:                     # Left -> vy +0.1
             ctl["vy"] = min(ctl["vy"] + 0.1, vy_max)
-        elif keycode in (262, 68):               # Right / D -> vy -0.1
+        elif keycode == 262:                     # Right -> vy -0.1
             ctl["vy"] = max(ctl["vy"] - 0.1, -vy_max)
         elif keycode == 81:                      # Q -> wz +0.1
             ctl["wz"] = min(ctl["wz"] + 0.1, wz_max)
         elif keycode == 69:                      # E -> wz -0.1
             ctl["wz"] = max(ctl["wz"] - 0.1, -wz_max)
-        elif keycode == 86:                      # V -> stop
+        elif keycode == 86:                      # V -> zero command
             ctl["vx"] = ctl["vy"] = ctl["wz"] = 0.0
         elif keycode == 67:                      # C -> cruise
             ctl["vx"], ctl["vy"], ctl["wz"] = min(0.4, vx_max), 0.0, 0.0
@@ -325,7 +389,10 @@ def main():
     parser.add_argument("--scene", default="flat",
                         help="terrain: flat|stairs|perlin|course (default: flat; course = flat start -> "
                              "stairs up/over/down -> perlin rough)")
-    parser.add_argument("--step_rise", type=float, default=0.12, help="stair step height (m, default 0.12)")
+    parser.add_argument("--step_rise", type=float, default=None,
+                        help="arbitrary stair step height in metres (default 0.12)")
+    parser.add_argument("--stair_height_cm", type=int, choices=(6, 8, 10, 12, 15, 18),
+                        default=None, help="convenient stair-height preset in cm")
     parser.add_argument("--step_tread", type=float, default=0.30, help="stair step depth (m, default 0.30 = training step_width)")
     parser.add_argument("--n_steps", type=int, default=12, help="stair steps up (then down)")
     parser.add_argument("--stair_width", type=float, default=6.0, help="stair width (m, default 6.0)")
@@ -334,24 +401,70 @@ def main():
     parser.add_argument("--no_act_delay", action="store_true",
                         help="disable the actuator command delay (training uses DelayedPDActuator "
                              "0-2 physics steps; use for an ablation)")
+    parser.add_argument("--act_delay", type=int, choices=range(GO1_MIN_DELAY, GO1_MAX_DELAY + 1),
+                        default=None, help="fix actuator delay in physics steps for reproducible tests")
     parser.add_argument("--perlin_amp", type=float, default=0.18, help="perlin amplitude (m)")
     parser.add_argument("--viewer", action="store_true",
                         help="open an interactive mujoco viewer + live depth window (needs a display). "
-                             "Keys: Up/Down=vx Left/Right(+A/D)=vy Q/E=wz (+-0.1/press), "
-                             "V=stop C=cruise B=toggle zero depth ESC=quit")
+                             "Keys: Up/Down=vx Left/Right=vy Q/E=wz (+-0.1/press), "
+                             "V=zero C=cruise B=toggle zero depth ESC=quit")
     parser.add_argument("--cmd", default="0.0 0.0 0.0",
                         help="fixed velocity command 'vx vy wz' for headless runs (default 0 0 0); "
                              "with --viewer the keyboard overrides it")
     parser.add_argument("--no_video", action="store_true", help="skip dual-pane mp4 recording")
+    parser.add_argument("--video_stride", type=int, default=1,
+                        help="record every Nth policy frame without changing simulation timing")
+    parser.add_argument("--fsm", action="store_true",
+                        help="run PASSIVE/DAMPING/STAND/SITDOWN/RL through the deployment FSM")
+    parser.add_argument("--fsm_config", default=os.path.join(HERE, "fsm_sim_config.json"),
+                        help="FSM pose/gain configuration (simulation only)")
+    parser.add_argument("--rl_entry_seconds", type=float, default=None,
+                        help="override FSM STAND->RL target blend duration for ablation")
+    parser.add_argument("--fsm_scripted", action="store_true",
+                        help="headless regression: STAND->RL->SITDOWN->DAMPING->PASSIVE")
+    parser.add_argument("--fsm_script", default=None,
+                        help="custom headless events, e.g. '0:STAND,4:RL,25:SITDOWN'")
     args = parser.parse_args()
+    if args.step_rise is not None and args.stair_height_cm is not None:
+        parser.error("choose --step_rise or --stair_height_cm, not both")
+    if args.step_rise is None:
+        args.step_rise = (args.stair_height_cm / 100.0
+                          if args.stair_height_cm is not None else 0.12)
+    if not np.isfinite(args.step_rise) or args.step_rise <= 0:
+        parser.error("--step_rise must be a positive finite value")
+    if args.video_stride < 1:
+        parser.error("--video_stride must be >= 1")
+    if args.no_act_delay and args.act_delay is not None:
+        parser.error("choose --no_act_delay or --act_delay")
+    if args.rl_entry_seconds is not None and (
+            not np.isfinite(args.rl_entry_seconds) or args.rl_entry_seconds < 0):
+        parser.error("--rl_entry_seconds must be nonnegative and finite")
+    if (args.fsm_scripted or args.fsm_script) and (not args.fsm or args.viewer):
+        parser.error("FSM scripts require --fsm and no --viewer")
+    if args.fsm_scripted and args.fsm_script:
+        parser.error("choose --fsm_scripted or --fsm_script")
     try:
         _vx, _vy, _wz = (float(x) for x in args.cmd.split())
     except ValueError:
         raise SystemExit("--cmd must be 'vx vy wz' (three floats)")
+    if args.scene in ("stairs", "course"):
+        print(f"[INFO] staircase: rise={args.step_rise:.3f} m, "
+              f"tread={args.step_tread:.3f} m, steps={args.n_steps} up/down.")
 
     ckpt_path = os.path.abspath(args.ckpt)
     assert os.path.exists(ckpt_path), f"checkpoint not found: {ckpt_path}"
     run_dir = os.path.dirname(ckpt_path)
+    fsm_cfg = None
+    if args.fsm:
+        verify_bundle(os.path.join(HERE, "deployment_manifest.json"), args.fsm_config)
+        with open(args.fsm_config) as source:
+            fsm_cfg = json.load(source)
+        required = ("stand_pose_sdk", "initial_pose_sdk", "pose_kp", "pose_kd",
+                    "rl_kp", "rl_kd", "damping_kd", "stand_seconds",
+                    "sit_seconds", "pose_tolerance", "rl_entry_seconds")
+        missing = [name for name in required if name not in fsm_cfg]
+        if missing:
+            raise ValueError(f"FSM config missing: {missing}")
 
     # --- training config: read params/env.yaml (fallback to GO1 defaults) ---
     tcfg = GO1_DEFAULTS
@@ -413,6 +526,14 @@ def main():
     delay = int(md.get("depth_delay_frames", 0))
     print(f"[INFO] rl_freq={rl_freq:.1f} obs={md['common_obs_size']} depth_len={depth_len} "
           f"depth_fps={depth_fps} blur_sigma={blur_sigma} delay={delay} history step(s)")
+    if args.fsm and (use_clock or md["common_obs_size"] != 225 or
+                     depth_len != 5 or delay != 1 or (depth_h, depth_w) != (60, 106)):
+        raise ValueError("Shared deployment core requires the current student format: "
+                         "common=225, depth=5x60x106, delay=1, no clock")
+    if args.fsm and not np.allclose(command_a, COMMAND_LIMIT):
+        raise ValueError("Checkpoint command limits differ from the shared deployment core")
+    if args.fsm:
+        print(f"[CORE] go1_deploy_core.py sha256={core_sha256()}")
 
     # Use saved optical pose, not the mounting screw origin.
     camera_meta = md.get("depth_camera", {})
@@ -443,6 +564,14 @@ def main():
                               armature=tcfg['armature'], camera_position=camera_position,
                               camera_quaternion=camera_quaternion,
                               camera_intrinsics=camera_intrinsics, camera_size=(depth_h, depth_w))
+    if args.fsm:
+        xml = build_go1_scene_xml(
+            scene=args.scene, step_rise=args.step_rise, step_tread=args.step_tread,
+            n_steps=args.n_steps, width=args.stair_width, perlin_amp=args.perlin_amp,
+            kp=0.0, kd=0.0, armature=tcfg['armature'],
+            camera_position=camera_position, camera_quaternion=camera_quaternion,
+            camera_intrinsics=camera_intrinsics, camera_size=(depth_h, depth_w),
+            torque_control=True)
     model = mujoco.MjModel.from_xml_string(xml)
     # Use the training run's physics timestep, not only its control frequency.
     model.opt.timestep = tcfg['sim_dt']
@@ -467,19 +596,25 @@ def main():
     # edge and fall through on the stairs scene. For stairs/course, spawn 1 m back on
     # the flat approach so the robot walks onto the first step from level ground.
     spawn_x = -1.0 if args.scene in ("stairs", "course") else 0.0
-    data.qpos[:3] = [spawn_x, 0.0, 0.4]
+    data.qpos[:3] = [spawn_x, 0.0, 0.18 if args.fsm else 0.4]
     data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
-    for nm, val in zip(DESIRED_ORDER, DEFAULT_JOINT):
+    initial_policy_pose = DEFAULT_JOINT
+    if args.fsm:
+        initial_sdk = sdk_position_limit(fsm_cfg["initial_pose_sdk"])
+        initial_by_name = dict(zip(SDK_ORDER, initial_sdk))
+        initial_policy_pose = np.asarray([initial_by_name[name] for name in DESIRED_ORDER])
+    for nm, val in zip(DESIRED_ORDER, initial_policy_pose):
         jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, nm)
         if jid >= 0:
             data.qpos[model.jnt_qposadr[jid]] = val
     data.qvel[:] = 0.0
     mujoco.mj_forward(model, data)
-    for _ in range(int(3.0 / model.opt.timestep)):         # 3 s hold home pose
-        for i, jn in enumerate(joint_of_actuator):
-            if jn in policy_idx:
-                data.ctrl[i] = DEFAULT_JOINT[policy_idx[jn]]
-        mujoco.mj_step(model, data)
+    if not args.fsm:
+        for _ in range(int(3.0 / model.opt.timestep)):     # 3 s hold home pose
+            for i, jn in enumerate(joint_of_actuator):
+                if jn in policy_idx:
+                    data.ctrl[i] = DEFAULT_JOINT[policy_idx[jn]]
+            mujoco.mj_step(model, data)
     data.qvel[:] = 0.0
     mujoco.mj_forward(model, data)
     print(f"[INFO] settled trunk z={data.xpos[model.body('trunk').id, 2]:.3f} (dt={model.opt.timestep})")
@@ -490,7 +625,8 @@ def main():
     hist = np.zeros((depth_len + delay, 1, depth_h, depth_w), dtype=np.float16)
     phase = np.array([0.0, 0.5, 0.5, 0.0])                   # FL, FR, RL, RR
     past_actions = np.zeros(model.nu, dtype=np.float32)
-    ctl = {"vx": _vx, "vy": _vy, "wz": _wz}   # headless: fixed --cmd; --viewer keyboard overrides
+    ctl = {"vx": _vx, "vy": _vy, "wz": _wz,
+           "request": None, "rl_enabled": False}
     if args.viewer:
         initial_cmd = np.array([_vx, _vy, _wz])
         if not np.isfinite(initial_cmd).all():
@@ -510,9 +646,33 @@ def main():
 
     # --- actuator command delay (DelayedPDActuator min_delay..max_delay physics steps) ---
     # sampled once like the per-env randomization in training; --no_act_delay disables it
-    act_delay = 0 if args.no_act_delay else int(np.random.randint(GO1_MIN_DELAY, GO1_MAX_DELAY + 1))
+    act_delay = (args.act_delay if args.act_delay is not None else
+                 0 if args.no_act_delay else
+                 int(np.random.randint(GO1_MIN_DELAY, GO1_MAX_DELAY + 1)))
     delay_line = np.tile(DEFAULT_JOINT, (GO1_MAX_DELAY + 1, 1)).astype(np.float32)
     print(f"[INFO] actuator delay={act_delay} phys-steps, policy_every={policy_every} @ dt={sim_dt}")
+
+    machine = None
+    deploy_core = None
+    if args.fsm:
+        ones = np.ones(12, dtype=np.float32)
+        machine = StateMachine(
+            fsm_cfg["stand_pose_sdk"], ones * float(fsm_cfg["pose_kp"]),
+            ones * float(fsm_cfg["pose_kd"]), ones * float(fsm_cfg["damping_kd"]),
+            rl_kp=ones * float(fsm_cfg["rl_kp"]),
+            rl_kd=ones * float(fsm_cfg["rl_kd"]),
+            stand_seconds=float(fsm_cfg["stand_seconds"]),
+            sit_seconds=float(fsm_cfg["sit_seconds"]),
+            pose_tolerance=float(fsm_cfg["pose_tolerance"]),
+            position_limit=sdk_position_limit,
+            rl_entry_seconds=(float(args.rl_entry_seconds)
+                              if args.rl_entry_seconds is not None
+                              else float(fsm_cfg["rl_entry_seconds"])))
+        deploy_core = DeploymentCore(machine)
+        print("[INFO] FSM gains: pose Kp/Kd={}/{}; RL Kp/Kd={}/{}; damping Kd={}.".format(
+            fsm_cfg["pose_kp"], fsm_cfg["pose_kd"], fsm_cfg["rl_kp"],
+            fsm_cfg["rl_kd"], fsm_cfg["damping_kd"]))
+        print("[INFO] Starts PASSIVE at the configured crouch pose; press 1 promptly to test STAND.")
 
     # --- optional viewer ---
     viewer = None
@@ -521,14 +681,21 @@ def main():
             print("[ERROR] --viewer needs a display; run headless without it.")
             sys.exit(1)
         ctl["quit"] = False
-        viewer = mujoco.viewer.launch_passive(model, data, key_callback=_make_key_callback(ctl, command_a))
+        viewer = mujoco.viewer.launch_passive(
+            model, data, key_callback=_make_key_callback(ctl, command_a, args.fsm))
         viewer.cam.distance = 3.2
         viewer.cam.azimuth = 270.0
         viewer.cam.elevation = -18.0
         cv2.namedWindow("depth", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("depth", 480, 280)
-        print("[INFO] viewer on: Up/Down=vx Left/Right(+A/D)=vy Q/E=wz V=stop "
-              "C=cruise B=toggle zero depth ESC=quit.")
+        if args.fsm:
+            print("[INFO] FSM viewer: 0=PASSIVE Space/Esc=DAMPING 1=STAND "
+                  "2=SITDOWN 3=RL X=quit; Up/Down=vx Left/Right=vy Q/E=wz "
+                  "V=zero C=cruise "
+                  "B=toggle zero depth.")
+        else:
+            print("[INFO] viewer on: Up/Down=vx Left/Right=vy Q/E=wz V=zero "
+                  "C=cruise B=toggle zero depth ESC=quit.")
 
     # --- optional dual-pane video ---
     recording = not args.no_video
@@ -543,6 +710,8 @@ def main():
         vcam.azimuth = 180.0
         vcam.elevation = -18.0
         ckpt_tag = os.path.splitext(os.path.basename(ckpt_path))[0]   # e.g. dagger_policy, dagger_policy_raycaster
+        if args.fsm:
+            ckpt_tag += "_fsm"
         video_path = os.path.join(run_dir, "videos", "dagger_play", f"mj_sim2sim_go1_{ckpt_tag}.mp4")
         os.makedirs(os.path.dirname(video_path), exist_ok=True)
 
@@ -550,6 +719,10 @@ def main():
     # Start after settling and renderer/viewer setup, not at application launch.
     wall_start = time.perf_counter()
     sim_start = data.time
+    scripted_events = ([[0.0, STAND], [4.0, RL], [5.5, SITDOWN],
+                        [9.0, DAMPING], [10.0, PASSIVE]] if args.fsm_scripted
+                       else _parse_fsm_script(args.fsm_script) if args.fsm_script else [])
+    fsm_metrics = {}
     if args.viewer:
         print('[INFO] viewer real-time synchronization enabled (target speed=1x).')
     for p in range(N_policy):
@@ -557,11 +730,22 @@ def main():
             print("[INFO] viewer closed -> stopping early")
             break
 
+        if scripted_events and data.time - sim_start >= scripted_events[0][0]:
+            _, ctl["request"] = scripted_events.pop(0)
+            ctl["rl_enabled"] = ctl["request"] == RL
+
         quat = data.qpos[3:7]
         # Free-joint angular qvel is already in the local body frame, matching
         # IsaacLab root_ang_vel_b. Do not rotate it from world to body again.
         ang_vel_b = data.qvel[3:6].copy()
-        grav_b = _projected_gravity(quat)
+        sdk_q = np.asarray([
+            data.qpos[model.jnt_qposadr[mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_JOINT, name)]] for name in SDK_ORDER],
+            dtype=np.float32)
+        sdk_dq = np.asarray([
+            data.qvel[model.jnt_dofadr[mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_JOINT, name)]] for name in SDK_ORDER],
+            dtype=np.float32)
         jp = np.array([data.qpos[model.jnt_qposadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, nm)]]
                        for nm in DESIRED_ORDER])
         jv = np.array([data.qvel[model.jnt_dofadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, nm)]]
@@ -570,13 +754,17 @@ def main():
         if args.viewer and (last_cmd is None or np.any(np.abs(cmd - last_cmd) > 1e-3)):
             print(f"[CMD] vx={ctl['vx']:+.2f} vy={ctl['vy']:+.2f} wz={ctl['wz']:+.2f}", flush=True)
             last_cmd = cmd
-        # 45-dim frame without clock; older clock-enabled students use 49 dims.
-        obs1 = np.concatenate([ang_vel_b, grav_b, cmd, jp - DEFAULT_JOINT, jv, past_actions])
-        if use_clock:
-            phase = (phase + tcfg["step_freq"] / rl_freq) % 1.0
-            obs1 = np.concatenate([obs1, phase]) if np.linalg.norm(cmd) > 0.01 else np.concatenate([obs1, -np.ones(4)])
-        obs_hist = np.roll(obs_hist, -1, axis=0)
-        obs_hist[-1] = obs1
+        if deploy_core is None:
+            # Legacy non-FSM playback remains available for older 49-D students.
+            grav_b = _projected_gravity(quat)
+            obs1 = np.concatenate([ang_vel_b, grav_b, cmd, jp - DEFAULT_JOINT,
+                                   jv, past_actions])
+            if use_clock:
+                phase = (phase + tcfg["step_freq"] / rl_freq) % 1.0
+                obs1 = (np.concatenate([obs1, phase]) if np.linalg.norm(cmd) > 0.01
+                        else np.concatenate([obs1, -np.ones(4)]))
+            obs_hist = np.roll(obs_hist, -1, axis=0)
+            obs_hist[-1] = obs1
 
         if ctl.get("sensor_blind", False):
             depth_t = torch.zeros((1, 1, depth_h, depth_w), dtype=torch.float32, device=device)
@@ -586,17 +774,22 @@ def main():
                 additive_noise_std=float(md.get("depth_sensor_noise", {}).get("additive_noise_std", 0.0)),
                 dropout_prob=float(md.get("depth_sensor_noise", {}).get("dropout_prob", 0.0)),
             )
-        frame = depth_t.squeeze(0).squeeze(0).numpy().astype(np.float16)
-        if p == 0:
-            hist[:] = frame
+        frame = depth_t.squeeze(0).squeeze(0).numpy().astype(np.float32)
+        if deploy_core is not None:
+            seq, common_array = deploy_core.prepare_policy_inputs(
+                ang_vel_b, quat, cmd, sdk_q, sdk_dq, frame)
         else:
-            hist = np.roll(hist, -1, axis=0)
-            hist[-1] = frame
-        # Match control-step history sampling and delay in the original DAgger.
-        if delay > 0:
-            seq = hist[-depth_len - delay:-delay]
-        else:
-            seq = hist[-depth_len:]
+            frame16 = frame.astype(np.float16)
+            if p == 0:
+                hist[:] = frame16
+            else:
+                hist = np.roll(hist, -1, axis=0)
+                hist[-1] = frame16
+            if delay > 0:
+                seq = hist[-depth_len - delay:-delay]
+            else:
+                seq = hist[-depth_len:]
+            common_array = obs_hist.reshape(-1)
 
         if args.viewer:
             d_show = np.clip(depth_t.squeeze(0).squeeze(0).numpy(), 0.0, 2.0) / 2.0
@@ -604,7 +797,7 @@ def main():
             cv2.imshow("depth", cv2.resize(d_gray, (480, 280), interpolation=cv2.INTER_NEAREST))
             cv2.waitKey(1)
 
-        if recording:
+        if recording and p % args.video_stride == 0:
             wq, xq, yq, zq = data.qpos[3:7]
             yaw = np.arctan2(2.0 * (wq * zq + xq * yq), 1.0 - 2.0 * (yq * yq + zq * zq))
             vcam.azimuth = np.degrees(np.arctan2(-np.cos(yaw), -np.sin(yaw)))
@@ -621,33 +814,81 @@ def main():
             d_resized = cv2.resize(d_bgr, (w, h), interpolation=cv2.INTER_CUBIC)
             frame = np.hstack([rgb, d_resized])
             if writer is None:
-                writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*"mp4v"), rl_freq,
+                writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*"mp4v"),
+                                         rl_freq / args.video_stride,
                                          (frame.shape[1], frame.shape[0]))
             writer.write(frame)
 
-        seq = torch.from_numpy(seq)[None].float().contiguous()   # (1, depth_len, 1, H, W)
+        seq_array = seq[:, None] if seq.ndim == 3 else seq
+        seq = torch.from_numpy(seq_array)[None].float().contiguous()
         if ctl.get("sensor_blind", False):
             seq.zero_()  # immediate actor failure; zero frames also persist in the history
-        common = torch.from_numpy(obs_hist.reshape(1, -1)).float()
-        with torch.no_grad():
-            actions, _ = net(seq, common, hidden=None)
-        actions = actions[0].numpy()
+        common = torch.from_numpy(common_array[None]).float()
+        should_infer = (deploy_core is None or machine.mode == RL or
+                        ctl.get("request") == RL)
+        actions = None
+        if should_infer:
+            with torch.no_grad():
+                actions_out, _ = net(seq, common, hidden=None)
+            actions = actions_out[0].numpy()
 
-        # action processing (training order: clip -> filter -> scale -> +default)
-        actions = np.clip(actions, -tcfg["clip_actions"], tcfg["clip_actions"])
-        temp = 0.8 * actions + 0.2 * past_actions if tcfg["use_filter"] else actions
-        target_pos = tcfg["action_scale"] * temp + DEFAULT_JOINT
-        past_actions = actions.copy()
+        if deploy_core is None:
+            actions = np.clip(actions, -tcfg["clip_actions"], tcfg["clip_actions"])
+            temp = 0.8 * actions + 0.2 * past_actions if tcfg["use_filter"] else actions
+            target_pos = tcfg["action_scale"] * temp + DEFAULT_JOINT
+        else:
+            target_pos = None
+
+        fsm_result = None
+        if machine is not None:
+            request = ctl.get("request")
+            ctl["request"] = None
+            previous_mode = machine.mode
+            fsm_result = deploy_core.step(
+                data.time, sdk_q, request=request, network_action=actions,
+                state_fresh=True, depth_fresh=True,
+                rl_enabled=bool(ctl.get("rl_enabled", False)))
+            if machine.mode != previous_mode:
+                print(f"[FSM] {previous_mode} -> {machine.mode}", flush=True)
+                if machine.mode == STAND:
+                    print(f"[POSE] saved SITDOWN={machine.sit_pose.tolist()}", flush=True)
+            if request == RL and machine.mode != RL:
+                print("[FSM] RL rejected: STAND must be complete first.", flush=True)
+        # The observation's previous_action is the action that was actually selected
+        # by the RL controller. Predictions made while STAND/SITDOWN are active were
+        # never executed and must not leak into the RL history.
+        if machine is None:
+            past_actions = actions.copy()
+        elif fsm_result.mode == RL:
+            target_pos = sdk_to_policy(fsm_result.q)
 
         for _ in range(policy_every):
             # actuator command delay: apply the target from `act_delay` physics steps ago
             # (matches DelayedPDActuator; no soft-limit clamp -- training doesn't clamp targets)
-            delay_line = np.roll(delay_line, 1, axis=0)
-            delay_line[0] = target_pos
+            if fsm_result is None or fsm_result.mode == RL:
+                delay_line = np.roll(delay_line, 1, axis=0)
+                delay_line[0] = target_pos
             ctrl_target = delay_line[act_delay]
-            for i, jn in enumerate(joint_of_actuator):
-                if jn in policy_idx:
-                    data.ctrl[i] = ctrl_target[policy_idx[jn]]
+            if fsm_result is None:
+                for i, jn in enumerate(joint_of_actuator):
+                    if jn in policy_idx:
+                        data.ctrl[i] = ctrl_target[policy_idx[jn]]
+            else:
+                # LowCmd-equivalent explicit joint PD. Motor actuators enforce the
+                # Menagerie/URDF effort limits after this computation.
+                q_command = fsm_result.q
+                if fsm_result.mode == RL:
+                    delayed_by_name = dict(zip(DESIRED_ORDER, ctrl_target))
+                    q_command = np.asarray([delayed_by_name[name] for name in SDK_ORDER])
+                q_by_name = dict(zip(SDK_ORDER, q_command))
+                kp_by_name = dict(zip(SDK_ORDER, fsm_result.kp))
+                kd_by_name = dict(zip(SDK_ORDER, fsm_result.kd))
+                for i, jn in enumerate(joint_of_actuator):
+                    jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, jn)
+                    q_now = data.qpos[model.jnt_qposadr[jid]]
+                    dq_now = data.qvel[model.jnt_dofadr[jid]]
+                    data.ctrl[i] = (kp_by_name[jn] * (q_by_name[jn] - q_now)
+                                    - kd_by_name[jn] * dq_now)
             mujoco.mj_step(model, data)
         # mj_step integrates qpos after computing kinematics. Refresh poses so
         # camera/gravity observations correspond to the same state as qpos/qvel.
@@ -658,17 +899,63 @@ def main():
             viewer.cam.lookat[:] = data.xpos[base_id]
             viewer.sync()
 
-        if any(base_id in (model.geom_bodyid[c.geom1], model.geom_bodyid[c.geom2])
-               for c in data.contact):
+        trunk_contact = any(base_id in (model.geom_bodyid[c.geom1], model.geom_bodyid[c.geom2])
+                            for c in data.contact)
+        if trunk_contact:
             base_contact += 1
-        if p % 200 == 0:
-            print(f"[INFO] p={p} base=({data.qpos[0]:.2f},{data.qpos[1]:.2f},{data.qpos[2]:.2f}) "
+        if machine:
+            roll, pitch = _roll_pitch(data.qpos[3:7])
+            metric = fsm_metrics.setdefault(machine.mode, dict(
+                steps=0, trunk_contact_steps=0, fall_steps=0, min_z=float('inf'),
+                max_abs_roll=0.0, max_abs_pitch=0.0, max_dq=0.0, max_q_error=0.0,
+                velocity_limit_exceed_steps=0, velocity_limit_exceed_samples=0))
+            metric['steps'] += 1
+            metric['trunk_contact_steps'] += int(trunk_contact)
+            stable_mode = machine.mode == RL or (machine.mode == STAND and machine.pose_complete)
+            metric['fall_steps'] += int(stable_mode and
+                                        (data.qpos[2] < 0.12 or abs(roll) > 0.8 or abs(pitch) > 0.8))
+            metric['min_z'] = min(metric['min_z'], float(data.qpos[2]))
+            metric['max_abs_roll'] = max(metric['max_abs_roll'], abs(float(roll)))
+            metric['max_abs_pitch'] = max(metric['max_abs_pitch'], abs(float(pitch)))
+            dq_abs = np.abs(np.asarray([
+                data.qvel[model.jnt_dofadr[mujoco.mj_name2id(
+                    model, mujoco.mjtObj.mjOBJ_JOINT, name)]] for name in SDK_ORDER]))
+            dq_exceeded = dq_abs > GO1_VELOCITY_LIMIT_SDK
+            metric['velocity_limit_exceed_steps'] += int(np.any(dq_exceeded))
+            metric['velocity_limit_exceed_samples'] += int(np.count_nonzero(dq_exceeded))
+            dq_index = int(np.argmax(dq_abs))
+            if float(dq_abs[dq_index]) > metric['max_dq']:
+                metric['max_dq'] = float(dq_abs[dq_index])
+                metric['max_dq_time'] = float(data.time - sim_start)
+                metric['max_dq_joint'] = SDK_ORDER[dq_index]
+            if fsm_result.mode in (STAND, SITDOWN, RL):
+                measured_sdk = np.asarray([
+                    data.qpos[model.jnt_qposadr[mujoco.mj_name2id(
+                        model, mujoco.mjtObj.mjOBJ_JOINT, name)]] for name in SDK_ORDER])
+                q_error = np.abs(fsm_result.q - measured_sdk)
+                error_index = int(np.argmax(q_error))
+                if float(q_error[error_index]) > metric['max_q_error']:
+                    metric['max_q_error'] = float(q_error[error_index])
+                    metric['max_q_error_time'] = float(data.time - sim_start)
+                    metric['max_q_error_joint'] = SDK_ORDER[error_index]
+        report_every = 50 if machine else 200
+        if p % report_every == 0:
+            mode_text = f" mode={machine.mode} reached={machine.pose_complete}" if machine else ""
+            if fsm_result is not None and fsm_result.mode in (STAND, SITDOWN, RL):
+                measured_sdk = np.asarray([
+                    data.qpos[model.jnt_qposadr[mujoco.mj_name2id(
+                        model, mujoco.mjtObj.mjOBJ_JOINT, name)]] for name in SDK_ORDER])
+                mode_text += (f" max_q_error={np.max(np.abs(fsm_result.q-measured_sdk)):.3f}"
+                              f" max_dq={np.max(np.abs(data.qvel[6:])):.3f}")
+            print(f"[INFO] p={p}{mode_text} base=({data.qpos[0]:.2f},{data.qpos[1]:.2f},{data.qpos[2]:.2f}) "
                   f"base_contact={base_contact}")
         if args.viewer:
             _sync_realtime(wall_start, data.time - sim_start)
 
     print(f"[RESULT] policy_steps={completed_steps} base_contact={base_contact} "
           f"base=({data.qpos[0]:.2f},{data.qpos[1]:.2f},{data.qpos[2]:.2f})")
+    if machine:
+        print("[FSM_METRICS] " + json.dumps(fsm_metrics, sort_keys=True))
     if args.viewer:
         viewer.close()
         cv2.destroyAllWindows()

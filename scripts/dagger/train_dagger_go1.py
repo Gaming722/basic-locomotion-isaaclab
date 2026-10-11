@@ -219,6 +219,18 @@ parser.add_argument(
     help="Path to a trained dagger_policy.pt to evaluate. Required iff --eval.",
 )
 parser.add_argument(
+    "--obs_dump",
+    type=str,
+    default=None,
+    help="Eval only: save the exact student input sequence and raw actions for one environment to an NPZ file.",
+)
+parser.add_argument(
+    "--obs_dump_env",
+    type=int,
+    default=0,
+    help="Environment index recorded by --obs_dump (default: 0).",
+)
+parser.add_argument(
     "--cmd",
     type=str,
     default=None,
@@ -654,6 +666,13 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
         print(f"[INFO] Live depth preview: env={follow_env}, latest frame in actor's delayed depth history "
               "(near=white, far=black). Click the Isaac Sim window for keyboard commands.")
 
+    dump_records = []
+    dump_env = args_cli.obs_dump_env
+    if args_cli.obs_dump is not None:
+        if not 0 <= dump_env < num_envs:
+            raise ValueError(f"--obs_dump_env must be in [0, {num_envs}), got {dump_env}")
+        print(f"[INFO] Observation audit: recording env={dump_env} to {args_cli.obs_dump}")
+
     step = 0
     while simulation_app.is_running() and (max_steps is None or step < max_steps):
         start_time = time.time()
@@ -677,6 +696,16 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
             device=device,
             zero_depth=keyboard_controller.sensor_blind if keyboard_controller is not None else False,
         )
+
+        if args_cli.obs_dump is not None:
+            depth_sequence = _depth_sequence_from_history(depth_history, newest_index)
+            dump_records.append(
+                (
+                    common_obs[dump_env].detach().to(device="cpu", dtype=torch.float32).numpy().copy(),
+                    depth_sequence[dump_env].detach().to(device="cpu", dtype=torch.float32).numpy().copy(),
+                    student_actions[dump_env].detach().to(device="cpu", dtype=torch.float32).numpy().copy(),
+                )
+            )
 
         obs, _, dones, _ = env.step(student_actions)
         dones_cpu = dones.bool().to(device="cpu")
@@ -737,6 +766,18 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
             time.sleep(sleep_time)
     if depth_preview is not None:
         depth_preview.close()
+    if args_cli.obs_dump is not None and dump_records:
+        output = os.path.abspath(os.path.expanduser(args_cli.obs_dump))
+        os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
+        np.savez_compressed(
+            output,
+            common=np.stack([record[0] for record in dump_records]),
+            depth=np.stack([record[1] for record in dump_records]),
+            raw_action=np.stack([record[2] for record in dump_records]),
+            env=np.int64(dump_env),
+            step_dt=np.float32(env.unwrapped.step_dt),
+        )
+        print(f"[INFO] Observation audit saved: {output} ({len(dump_records)} samples)")
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -746,6 +787,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         raise ValueError("--keyboard is only available with --eval.")
     if args_cli.show_depth and (not args_cli.eval or args_cli.headless):
         raise ValueError("--show_depth requires visible --eval (omit --headless).")
+    if args_cli.obs_dump is not None and not args_cli.eval:
+        raise ValueError("--obs_dump is only available with --eval.")
     if args_cli.stair_direction and (not args_cli.eval or args_cli.terrain != "stairs"):
         raise ValueError("--stair_direction requires --eval --terrain stairs.")
     # grab task name for checkpoint path

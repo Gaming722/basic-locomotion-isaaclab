@@ -17,10 +17,67 @@ python deploy/dagger/play_mujoco_dagger_go1.py \
   --scene stairs --viewer
 ```
 
+### 部署状态机仿真
+
+在连接真机以前，用同一套状态机语义验证 PASSIVE、DAMPING、STAND、
+SITDOWN 和 RL。快捷入口默认使用当前 `dagger_raycaster_v3_ft2.pt`：
+
+`go1_deploy_core.py` 是 MuJoCo 与 NX 真机部署逐字节相同的唯一控制核心，统一负责
+关节顺序、225 维观测、深度历史/延迟、raw-action low-pass、状态切换和 PD 命令。
+两端只分别实现 MuJoCo 与 LowState/D435/LowCmd I/O。启动时会用
+`deployment_manifest.json` 校验核心和 `fsm_sim_config.json` 的 SHA-256；任一端文件
+漂移都会拒绝运行，并在日志打印当前核心哈希。
+
+```bash
+bash deploy/dagger/play_mujoco_fsm_go1.sh
+```
+
+第一个参数选择地形，第二个参数选择楼梯高度（厘米）：
+
+```bash
+bash deploy/dagger/play_mujoco_fsm_go1.sh stairs 8
+bash deploy/dagger/play_mujoco_fsm_go1.sh stairs 10
+bash deploy/dagger/play_mujoco_fsm_go1.sh stairs 12
+bash deploy/dagger/play_mujoco_fsm_go1.sh stairs 15
+bash deploy/dagger/play_mujoco_fsm_go1.sh stairs 18
+```
+
+支持的快捷预设为 6/8/10/12/15/18 cm；也可直接运行 Python 并用
+`--step_rise 0.13` 指定任意正数高度。自定义 checkpoint 可通过
+`GO1_STUDENT_CKPT=/path/student.pt` 传入快捷脚本。
+
+状态键为 `0=PASSIVE`、`Space/Esc=DAMPING`、`1=STAND`、`2=SITDOWN`、
+`3=RL`、`X=退出`。RL 只能从已到位的 STAND 进入。
+速度键严格沿用原有 sim2sim：`Up/Down=vx`、`Left/Right=vy`、`Q/E=wz`
+（每次 0.1），`V=速度指令全零`、`C=0.4 m/s 前进`、`B=深度失能/恢复`。
+不使用 MuJoCo 的 `W=wireframe` 和 `R=reload`；左右方向键的 viewer 历史步进
+在 passive 模式下不驱动物理。仿真从 `fsm_sim_config.json` 的趴地姿态开始；进入
+STAND 时保存当次实测姿态作为 SITDOWN 终点。
+
+该模式将 MuJoCo 执行器改为力矩接口，并逐物理步计算
+`tau=Kp*(q_des-q)-Kd*dq`，从而让 PASSIVE、DAMPING 和各状态独立增益的
+含义与真机 LowCmd 一致。当前候选参数为姿态控制 `50/5`、RL `35/0.5`、
+DAMPING `Kd=1`；它们首先只在仿真中验证，不会自动同步到真机。
+
+无窗口回归序列：
+
+```bash
+conda run -n sim2sim python deploy/dagger/play_mujoco_dagger_go1.py \
+  --ckpt logs/rsl_rl/rough_direct/<run>/student.pt --scene flat \
+  --fsm --fsm_scripted --policy_steps 550 --no_video
+```
+
+可用 `--fsm_script '0:STAND,4:RL,25:SITDOWN'` 自定义无窗口状态时间线。
+结束时的 `FSM_METRICS` 会按状态汇总机身触地、跌倒判据、最低机身高度、
+最大姿态角、最大关节误差/速度及其发生时间和关节，并统计超过 Go1 URDF
+关节速度限值的控制步/样本数。当前固定延迟测试结果见
+[`FSM_SIM2SIM_REPORT.md`](FSM_SIM2SIM_REPORT.md)。录制较长回归时可加
+`--video_stride 5` 只降低视频到 10 FPS，不改变物理或策略频率。
+
 - **Tiled / RayCaster 通用**：从 checkpoint 读取分辨率、完整内参 K 和 ROS optical 外参，转换到 MuJoCo/OpenGL 相机坐标系。相机位置是深度光心，不是安装螺孔；旧 checkpoint 缺少标定时会告警并使用当前名义标定。
 - `--viewer` 需要显示；headless 用 EGL（`MUJOCO_GL=egl`，默认）。
 - `--viewer` 默认按真实时间限速（目标 1×），headless 不限速。计算/渲染太慢时仍会慢于实时，不修改物理步长或跳过控制步。
-- 键盘：`Up/Down`=vx、`Left/Right`(+A/D)=vy、`Q/E`=wz（每次 ±0.1）、`V`=停止、`C`=巡航(0.4,0,0)、`B`=深度全零/恢复、`ESC`=退出。`B` 开启时 actor 立即收到全零深度，后续历史帧也写零；恢复后历史逐步填满。预览按原有近白远黑映射呈白色。这是超出正常预处理分布的硬失能测试，不代表真实设备失效时的全部行为。
+- 键盘：`Up/Down`=vx、`Left/Right`=vy、`Q/E`=wz（每次 ±0.1）、`V`=速度指令全零、`C`=巡航(0.4,0,0)、`B`=深度全零/恢复；普通模式 `ESC`=退出，FSM 模式 `X`=退出。`B` 开启时 actor 立即收到全零深度，后续历史帧也写零；恢复后历史逐步填满。预览按原有近白远黑映射呈白色。这是超出正常预处理分布的硬失能测试，不代表真实设备失效时的全部行为。
 - 键盘范围读取学生 checkpoint 的 `command_a`，缺失时告警并使用 ±(0.8,0.4,0.8)。巡航及 viewer 初始 `--cmd` 也限制在该范围内；headless 的显式 `--cmd` 保持不裁剪。
 - 默认录双窗视频到 `<ckpt目录>/videos/dagger_play/mj_sim2sim_go1_<checkpoint名>.mp4`；`--no_video` 跳过。
 

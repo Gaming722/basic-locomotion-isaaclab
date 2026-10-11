@@ -17,16 +17,20 @@ def eval_command(argv):
     parser.add_argument("--stair_direction", choices=("up", "down"), default=None)
     parser.add_argument("--no_depth_window", action="store_true",
                         help="Disable the live student depth window (enabled by default).")
+    parser.add_argument("--no_keyboard", action="store_true",
+                        help="Disable interactive keyboard commands (useful for headless observation audits).")
     args, remaining = parser.parse_known_args(argv)
     if args.stair_direction and args.terrain != "stairs":
         parser.error("--stair_direction requires --terrain stairs")
     evaluator = Path(__file__).with_name("train_dagger_go1.py")
     command = [sys.executable, str(evaluator),
-            "--eval", "--keyboard", "--real-time",
+            "--eval",
             "--task=Locomotion-Go1-Rough-Vision-RayCaster",
             "--num_envs=1", f"--terrain={args.terrain}",
             "--difficulty=0.4666666667",
             f"--eval_policy={args.policy}"]
+    if not args.no_keyboard:
+        command.extend(("--keyboard", "--real-time"))
     if not args.no_depth_window:
         command.append("--show_depth")
     if args.terrain == "stairs":
