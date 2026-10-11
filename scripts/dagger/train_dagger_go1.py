@@ -82,13 +82,13 @@ parser.add_argument(
 parser.add_argument(
     "--depth_additive_noise_std",
     type=float,
-    default=0.0,
+    default=0.01,
     help="Std (m) of additive Gaussian depth noise (D435 measurement noise). 0 disables.",
 )
 parser.add_argument(
     "--depth_dropout_prob",
     type=float,
-    default=0.0,
+    default=0.01,
     help="Probability of dropping a depth pixel to the far-saturation code 2.0 "
          "(simulate D435 holes/invalid pixels). 0 disables.",
 )
@@ -102,6 +102,18 @@ parser.add_argument(
     default=1,
     help="Additional delay in control-step history entries; default 1 is 20 ms at 50 Hz.",
 )
+parser.add_argument(
+    "--disable_proprio_noise", action="store_true", default=False,
+    help="Disable student-only proprioceptive noise during DAgger training. Evaluation is always noise-free.",
+)
+parser.add_argument("--proprio_gyro_noise_std", type=float, default=0.02,
+                    help="Student angular-velocity white-noise std in rad/s.")
+parser.add_argument("--proprio_gravity_noise_std", type=float, default=0.002,
+                    help="Student projected-gravity component white-noise std; vector is renormalized.")
+parser.add_argument("--proprio_joint_pos_noise_std", type=float, default=0.001,
+                    help="Student joint-position white-noise std in rad.")
+parser.add_argument("--proprio_joint_vel_noise_std", type=float, default=0.02,
+                    help="Student joint-velocity white-noise std in rad/s.")
 parser.add_argument(
     "--dagger_buffer_size",
     type=int,
@@ -299,6 +311,7 @@ from dagger_network import DaggerNet, DaggerReplayBuffer
 from keyboard_control import install_isaac_keyboard_commands
 from depth_pipeline import PIPELINE_VERSION, preprocess_depth, depth_sequence_from_history, student_depth_grayscale
 from depth_preview import IsaacDepthPreview
+from proprio_noise import ProprioNoiseCfg, ProprioceptiveNoise
 from video_follow import rotating_video_env
 
 import isaaclab.utils.math as math_utils
@@ -310,10 +323,14 @@ def _sanitize_depth_data(env: RslRlVecEnvWrapper, *, zero_depth: bool = False) -
         raise RuntimeError("DAgger requires a depth-enabled student task (Tiled or RayCaster).")
     depth = env.unwrapped._depth_camera.data.output["distance_to_image_plane"]
     depth = depth.permute(0, 3, 1, 2).contiguous()
+    # Synthetic corruption is a training augmentation. Evaluation/play and physical
+    # deployment must consume the sensor measurement without adding artificial noise.
+    randomize = not args_cli.eval
     processed = preprocess_depth(
         depth, blur_sigma=args_cli.depth_blur_sigma,
-        additive_noise_std=args_cli.depth_additive_noise_std,
-        dropout_prob=args_cli.depth_dropout_prob, min_z=args_cli.depth_min_z,
+        additive_noise_std=args_cli.depth_additive_noise_std if randomize else 0.0,
+        dropout_prob=args_cli.depth_dropout_prob if randomize else 0.0,
+        min_z=args_cli.depth_min_z,
     )
     if zero_depth:
         processed.zero_()
@@ -959,6 +976,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     device = env.unwrapped.device
     num_fixed_command_envs = get_num_fixed_command_envs(env.unwrapped.cfg, num_envs)
 
+    proprio_noise_cfg = ProprioNoiseCfg(
+        angular_velocity_std=args_cli.proprio_gyro_noise_std,
+        projected_gravity_std=args_cli.proprio_gravity_noise_std,
+        joint_position_std=args_cli.proprio_joint_pos_noise_std,
+        joint_velocity_std=args_cli.proprio_joint_vel_noise_std,
+    )
+    proprio_noise_cfg.validate()
+    use_proprio_noise = not args_cli.disable_proprio_noise and not args_cli.eval
+    proprio_noise = (
+        ProprioceptiveNoise(num_envs, env_cfg.history_length, device, proprio_noise_cfg)
+        if use_proprio_noise else None
+    )
+
     history_capacity = args_cli.depth_history_length + args_cli.depth_delay_frames
     depth_history = current_depth_cpu.unsqueeze(0).repeat(history_capacity, 1, 1, 1, 1).contiguous()
     history_index = history_capacity - 1
@@ -1015,6 +1045,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "additive_noise_std": args_cli.depth_additive_noise_std,
             "dropout_prob": args_cli.depth_dropout_prob,
         },
+        "proprioceptive_noise": {
+            "enabled_during_training": use_proprio_noise,
+            "model": "per_step_zero_mean_gaussian",
+            "noisy_terms": ("angular_velocity", "projected_gravity", "joint_position", "joint_velocity"),
+            "clean_terms": ("command", "previous_raw_action"),
+            **proprio_noise_cfg.to_dict(),
+        },
         "depth_image_size": tuple(current_depth_cpu.shape[-2:]),
         "depth_channels": depth_channels,
         "common_obs_size": common_obs_size,
@@ -1033,6 +1070,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         f"(num_envs={num_envs}, depth_history={args_cli.depth_history_length}, "
         f"depth_fps={args_cli.depth_fps}, depth_delay={args_cli.depth_delay_frames} control step(s), depth_blur_sigma={args_cli.depth_blur_sigma}, "
         f"depth_additive_std={args_cli.depth_additive_noise_std}, depth_dropout={args_cli.depth_dropout_prob}, "
+        f"proprio_noise={'on' if use_proprio_noise else 'off'}, "
+        f"proprio_std=[gyro={proprio_noise_cfg.angular_velocity_std}, "
+        f"gravity={proprio_noise_cfg.projected_gravity_std}, q={proprio_noise_cfg.joint_position_std}, "
+        f"dq={proprio_noise_cfg.joint_velocity_std}], "
         f"buffer={args_cli.dagger_buffer_size}, batch={args_cli.dagger_batch_size}, "
         f"train_micro_batch={args_cli.dagger_train_micro_batch_size}, "
         f"inference_batch={args_cli.dagger_inference_batch_size}, amp={_use_cuda_amp(device)}, "
@@ -1052,6 +1093,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     step = 0
     updates = 0
+    dones_cpu = torch.zeros(num_envs, dtype=torch.bool, device="cpu")
 
     # resume from a previous run if requested
     if args_cli.resume_from:
@@ -1072,7 +1114,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     while simulation_app.is_running() and (
         args_cli.max_training_steps is None or step < args_cli.max_training_steps
     ):
-        common_obs = obs["common"]
+        clean_common_obs = obs["common"]
+        common_obs = (
+            proprio_noise.update(clean_common_obs, dones_cpu)
+            if proprio_noise is not None else clean_common_obs
+        )
         # feed the student depth delayed by --depth_delay_frames (capture->inference latency)
         newest_index = _delayed_newest_index(history_index, history_capacity)
 
