@@ -41,6 +41,7 @@ sys.path.insert(0, os.path.join(REPO, "scripts", "dagger"))
 from mujoco_depth import MujocoDepthCamera
 from dagger_network import DaggerNet
 from depth_pipeline import preprocess_depth
+from proprio_noise import ProprioNoiseCfg, ProprioceptiveNoise
 from go1_deploy_core import (COMMAND_LIMIT, DEFAULT_JOINT, DAMPING, PASSIVE,
                              POLICY_JOINT_NAMES, RL, SDK_JOINT_NAMES,
                              SDK_VELOCITY_LIMIT, SITDOWN, STAND,
@@ -366,6 +367,9 @@ def _make_key_callback(ctl, command_a, fsm=False):
         elif keycode == 66:                      # B -> camera failure / recovery
             ctl["sensor_blind"] = not ctl.get("sensor_blind", False)
             print(f"[SENSOR] depth input {'ZERO' if ctl['sensor_blind'] else 'RESTORED'}", flush=True)
+        elif keycode == 78:                      # N -> proprio noise on/off
+            ctl["proprio_noise"] = not ctl.get("proprio_noise", False)
+            print(f"[SENSOR] proprio noise {'ON' if ctl['proprio_noise'] else 'OFF'}", flush=True)
     return key_callback
 
 
@@ -411,6 +415,18 @@ def main():
     parser.add_argument("--cmd", default="0.0 0.0 0.0",
                         help="fixed velocity command 'vx vy wz' for headless runs (default 0 0 0); "
                              "with --viewer the keyboard overrides it")
+    parser.add_argument("--proprio_noise", action="store_true",
+                        help="enable the same zero-mean per-step proprioceptive Gaussian noise "
+                             "used by noisy DAgger training; press N in the viewer to toggle")
+    parser.add_argument("--proprio_noise_seed", type=int, default=0,
+                        help="PyTorch RNG seed for reproducible proprioceptive noise (default: 0)")
+    parser.add_argument("--proprio_angular_velocity_std", type=float, default=0.02)
+    parser.add_argument("--proprio_projected_gravity_std", type=float, default=0.002)
+    parser.add_argument("--proprio_joint_position_std", type=float, default=0.001)
+    parser.add_argument("--proprio_joint_velocity_std", type=float, default=0.02)
+    parser.add_argument("--no_depth_noise", action="store_true",
+                        help="disable stochastic depth additive/dropout noise while preserving "
+                             "checkpoint blur, clipping, sampling and delay")
     parser.add_argument("--no_video", action="store_true", help="skip dual-pane mp4 recording")
     parser.add_argument("--video_stride", type=int, default=1,
                         help="record every Nth policy frame without changing simulation timing")
@@ -434,6 +450,14 @@ def main():
         parser.error("--step_rise must be a positive finite value")
     if args.video_stride < 1:
         parser.error("--video_stride must be >= 1")
+    proprio_stds = (
+        args.proprio_angular_velocity_std,
+        args.proprio_projected_gravity_std,
+        args.proprio_joint_position_std,
+        args.proprio_joint_velocity_std,
+    )
+    if any(not np.isfinite(value) or value < 0 for value in proprio_stds):
+        parser.error("proprioceptive noise standard deviations must be finite and nonnegative")
     if args.no_act_delay and args.act_delay is not None:
         parser.error("choose --no_act_delay or --act_delay")
     if args.rl_entry_seconds is not None and (
@@ -513,6 +537,8 @@ def main():
     if obs_frame_size not in (45, 49) or md['action_size'] != 12 or md['depth_channels'] != 1:
         raise ValueError('Expected GO1 student: 45/49-dim frames, 12 actions, one depth channel')
     use_clock = obs_frame_size == 49
+    if use_clock and args.proprio_noise:
+        parser.error("--proprio_noise supports the current 45-dim observation frame, not legacy clock models")
     depth_h, depth_w = map(int, md.get('depth_image_size', (DEPTH_H, DEPTH_W)))
     net = DaggerNet(vec_size=md["common_obs_size"], output_size=md["action_size"],
                     depth_channels=md["depth_channels"]).to("cpu")
@@ -626,7 +652,22 @@ def main():
     phase = np.array([0.0, 0.5, 0.5, 0.0])                   # FL, FR, RL, RR
     past_actions = np.zeros(model.nu, dtype=np.float32)
     ctl = {"vx": _vx, "vy": _vy, "wz": _wz,
+           "proprio_noise": bool(args.proprio_noise),
            "request": None, "rl_enabled": False}
+    proprio_noise = None
+    if not use_clock:
+        torch.manual_seed(args.proprio_noise_seed)
+        proprio_noise_cfg = ProprioNoiseCfg(
+            angular_velocity_std=args.proprio_angular_velocity_std,
+            projected_gravity_std=args.proprio_projected_gravity_std,
+            joint_position_std=args.proprio_joint_position_std,
+            joint_velocity_std=args.proprio_joint_velocity_std,
+        )
+        proprio_noise = ProprioceptiveNoise(
+            num_envs=1, history_length=tcfg["history_length"], device="cpu",
+            cfg=proprio_noise_cfg)
+        print(f"[INFO] proprio noise={'ON' if args.proprio_noise else 'OFF'} "
+              f"seed={args.proprio_noise_seed} std={proprio_noise_cfg.to_dict()}")
     if args.viewer:
         initial_cmd = np.array([_vx, _vy, _wz])
         if not np.isfinite(initial_cmd).all():
@@ -692,10 +733,10 @@ def main():
             print("[INFO] FSM viewer: 0=PASSIVE Space/Esc=DAMPING 1=STAND "
                   "2=SITDOWN 3=RL X=quit; Up/Down=vx Left/Right=vy Q/E=wz "
                   "V=zero C=cruise "
-                  "B=toggle zero depth.")
+                  "B=toggle zero depth N=toggle proprio noise.")
         else:
             print("[INFO] viewer on: Up/Down=vx Left/Right=vy Q/E=wz V=zero "
-                  "C=cruise B=toggle zero depth ESC=quit.")
+                  "C=cruise B=toggle zero depth N=toggle proprio noise ESC=quit.")
 
     # --- optional dual-pane video ---
     recording = not args.no_video
@@ -771,8 +812,10 @@ def main():
         else:
             depth_t = _preprocess_depth(
                 cam.render(), blur_sigma, device, min_z=float(md.get("depth_min_z", 0.0)),
-                additive_noise_std=float(md.get("depth_sensor_noise", {}).get("additive_noise_std", 0.0)),
-                dropout_prob=float(md.get("depth_sensor_noise", {}).get("dropout_prob", 0.0)),
+                additive_noise_std=(0.0 if args.no_depth_noise else
+                                    float(md.get("depth_sensor_noise", {}).get("additive_noise_std", 0.0))),
+                dropout_prob=(0.0 if args.no_depth_noise else
+                              float(md.get("depth_sensor_noise", {}).get("dropout_prob", 0.0))),
             )
         frame = depth_t.squeeze(0).squeeze(0).numpy().astype(np.float32)
         if deploy_core is not None:
@@ -790,6 +833,12 @@ def main():
             else:
                 seq = hist[-depth_len:]
             common_array = obs_hist.reshape(-1)
+
+        if proprio_noise is not None:
+            noisy_common = proprio_noise.update(
+                torch.from_numpy(common_array[None]).float()).numpy()[0]
+            if ctl.get("proprio_noise", False):
+                common_array = noisy_common
 
         if args.viewer:
             d_show = np.clip(depth_t.squeeze(0).squeeze(0).numpy(), 0.0, 2.0) / 2.0

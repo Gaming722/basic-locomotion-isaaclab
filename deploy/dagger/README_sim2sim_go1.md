@@ -50,6 +50,7 @@ bash deploy/dagger/play_mujoco_fsm_go1.sh stairs 18
 `3=RL`、`X=退出`。RL 只能从已到位的 STAND 进入。
 速度键严格沿用原有 sim2sim：`Up/Down=vx`、`Left/Right=vy`、`Q/E=wz`
 （每次 0.1），`V=速度指令全零`、`C=0.4 m/s 前进`、`B=深度失能/恢复`。
+`N` 可实时开启/关闭本体观测高斯噪声。
 不使用 MuJoCo 的 `W=wireframe` 和 `R=reload`；左右方向键的 viewer 历史步进
 在 passive 模式下不驱动物理。仿真从 `fsm_sim_config.json` 的趴地姿态开始；进入
 STAND 时保存当次实测姿态作为 SITDOWN 终点。
@@ -78,6 +79,12 @@ conda run -n sim2sim python deploy/dagger/play_mujoco_dagger_go1.py \
 - `--viewer` 需要显示；headless 用 EGL（`MUJOCO_GL=egl`，默认）。
 - `--viewer` 默认按真实时间限速（目标 1×），headless 不限速。计算/渲染太慢时仍会慢于实时，不修改物理步长或跳过控制步。
 - 键盘：`Up/Down`=vx、`Left/Right`=vy、`Q/E`=wz（每次 ±0.1）、`V`=速度指令全零、`C`=巡航(0.4,0,0)、`B`=深度全零/恢复；普通模式 `ESC`=退出，FSM 模式 `X`=退出。`B` 开启时 actor 立即收到全零深度，后续历史帧也写零；恢复后历史逐步填满。预览按原有近白远黑映射呈白色。这是超出正常预处理分布的硬失能测试，不代表真实设备失效时的全部行为。
+- **本体噪声 A/B**：加 `--proprio_noise --no_depth_noise` 后，以训练默认标准差对
+  `ang_vel/gravity/q/dq` 分别加入每控制步零均值高斯噪声
+  `0.02/0.002/0.001/0.02`，其余 command 和 previous-action 保持不变；`N` 可在
+  viewer 中实时切换。`--no_depth_noise` 只关闭随机 additive/dropout，仍保留 checkpoint
+  中的深度 clip、blur、采样率与延迟，适合隔离本体噪声。可用四个
+  `--proprio_*_std` 参数覆盖幅度，并用 `--proprio_noise_seed` 固定随机序列。
 - 键盘范围读取学生 checkpoint 的 `command_a`，缺失时告警并使用 ±(0.8,0.4,0.8)。巡航及 viewer 初始 `--cmd` 也限制在该范围内；headless 的显式 `--cmd` 保持不裁剪。
 - 默认录双窗视频到 `<ckpt目录>/videos/dagger_play/mj_sim2sim_go1_<checkpoint名>.mp4`；`--no_video` 跳过。
 
