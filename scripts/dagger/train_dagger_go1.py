@@ -231,6 +231,24 @@ parser.add_argument(
     help="Path to a trained dagger_policy.pt to evaluate. Required iff --eval.",
 )
 parser.add_argument(
+    "--eval_with_training_noise",
+    action="store_true",
+    default=False,
+    help="Eval only: reproduce the student-side proprioceptive and depth corruption used during training.",
+)
+parser.add_argument(
+    "--eval_metrics_path",
+    type=str,
+    default=None,
+    help="Eval only: write aggregate rollout metrics as JSON.",
+)
+parser.add_argument(
+    "--eval_metrics_warmup_steps",
+    type=int,
+    default=100,
+    help="Eval only: exclude this many initial control steps from tracking/action metrics.",
+)
+parser.add_argument(
     "--obs_dump",
     type=str,
     default=None,
@@ -271,6 +289,7 @@ simulation_app = app_launcher.app
 import math
 import os
 import time
+import json
 from collections import deque
 
 import cv2
@@ -325,7 +344,7 @@ def _sanitize_depth_data(env: RslRlVecEnvWrapper, *, zero_depth: bool = False) -
     depth = depth.permute(0, 3, 1, 2).contiguous()
     # Synthetic corruption is a training augmentation. Evaluation/play and physical
     # deployment must consume the sensor measurement without adding artificial noise.
-    randomize = not args_cli.eval
+    randomize = not args_cli.eval or args_cli.eval_with_training_noise
     processed = preprocess_depth(
         depth, blur_sigma=args_cli.depth_blur_sigma,
         additive_noise_std=args_cli.depth_additive_noise_std if randomize else 0.0,
@@ -505,6 +524,13 @@ def _validate_eval_cli_args() -> str:
         )
     if args_cli.keyboard and args_cli.cmd:
         raise SystemExit("Use --keyboard or --cmd, not both.")
+    if args_cli.eval_metrics_path is not None and args_cli.max_training_steps is None:
+        raise SystemExit("--eval_metrics_path requires --max_training_steps <N>.")
+    if args_cli.eval_metrics_warmup_steps < 0:
+        raise SystemExit("--eval_metrics_warmup_steps must be non-negative.")
+    if (args_cli.max_training_steps is not None
+            and args_cli.eval_metrics_warmup_steps >= args_cli.max_training_steps):
+        raise SystemExit("--eval_metrics_warmup_steps must be smaller than --max_training_steps.")
     if args_cli.cmd:
         try:
             _ = [float(x) for x in args_cli.cmd.split()]
@@ -658,6 +684,19 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
     dagger_net.load_state_dict(ckpt["model_state_dict"])
     dagger_net.eval()
 
+    proprio_noise = None
+    if args_cli.eval_with_training_noise:
+        noise_metadata = ckpt.get("metadata", {}).get("proprioceptive_noise", {})
+        proprio_noise_cfg = ProprioNoiseCfg(
+            angular_velocity_std=float(noise_metadata.get("angular_velocity_std", args_cli.proprio_gyro_noise_std)),
+            projected_gravity_std=float(noise_metadata.get("projected_gravity_std", args_cli.proprio_gravity_noise_std)),
+            joint_position_std=float(noise_metadata.get("joint_position_std", args_cli.proprio_joint_pos_noise_std)),
+            joint_velocity_std=float(noise_metadata.get("joint_velocity_std", args_cli.proprio_joint_vel_noise_std)),
+        )
+        proprio_noise = ProprioceptiveNoise(
+            num_envs, env.unwrapped.cfg.history_length, device, proprio_noise_cfg
+        )
+
     robot = env.unwrapped._robot
     eye_offset_b = torch.tensor([-args_cli.cam_distance, args_cli.cam_side, args_cli.cam_height], device=device)
     tgt_offset_b = torch.tensor([0.6, 0.0, 0.3], device=device)
@@ -690,10 +729,31 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
             raise ValueError(f"--obs_dump_env must be in [0, {num_envs}), got {dump_env}")
         print(f"[INFO] Observation audit: recording env={dump_env} to {args_cli.obs_dump}")
 
+    metrics_enabled = args_cli.eval_metrics_path is not None
+    metric_steps = 0
+    fall_events = 0
+    fallen_envs = torch.zeros(num_envs, dtype=torch.bool, device=device)
+    first_fall_step = torch.full((num_envs,), -1, dtype=torch.long, device=device)
+    action_sq_sum = 0.0
+    action_count = 0
+    action_abs_max = 0.0
+    action_delta_sq_sum = 0.0
+    action_delta_count = 0
+    action_delta_abs_max = 0.0
+    lin_vel_abs_error_sum = torch.zeros(2, dtype=torch.float64, device=device)
+    yaw_rate_abs_error_sum = 0.0
+    tracking_count = 0
+    previous_actions = None
+    dones_cpu = torch.zeros(num_envs, dtype=torch.bool, device="cpu")
+
     step = 0
     while simulation_app.is_running() and (max_steps is None or step < max_steps):
         start_time = time.time()
-        common_obs = obs["common"]
+        clean_common_obs = obs["common"]
+        common_obs = (
+            proprio_noise.update(clean_common_obs, dones_cpu)
+            if proprio_noise is not None else clean_common_obs
+        )
         newest_index = _delayed_newest_index(history_index, history_capacity)
         if depth_preview is not None:
             preview_depth = depth_history[newest_index, follow_env, 0]
@@ -714,6 +774,31 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
             zero_depth=keyboard_controller.sensor_blind if keyboard_controller is not None else False,
         )
 
+        if metrics_enabled and step >= args_cli.eval_metrics_warmup_steps:
+            metric_steps += 1
+            actions64 = student_actions.to(dtype=torch.float64)
+            action_sq_sum += actions64.square().sum().item()
+            action_count += actions64.numel()
+            action_abs_max = max(action_abs_max, actions64.abs().max().item())
+            if previous_actions is not None:
+                valid_delta = ~dones_cpu.to(device=device)
+                if valid_delta.any():
+                    delta = actions64[valid_delta] - previous_actions[valid_delta]
+                    action_delta_sq_sum += delta.square().sum().item()
+                    action_delta_count += delta.numel()
+                    action_delta_abs_max = max(action_delta_abs_max, delta.abs().max().item())
+
+            commands = env.unwrapped._commands
+            lin_vel_abs_error_sum += (
+                commands[:, :2] - robot.data.root_lin_vel_b[:, :2]
+            ).abs().to(dtype=torch.float64).sum(dim=0)
+            yaw_rate_abs_error_sum += (
+                commands[:, 2] - robot.data.root_ang_vel_b[:, 2]
+            ).abs().to(dtype=torch.float64).sum().item()
+            tracking_count += num_envs
+
+        previous_actions = student_actions.detach().to(dtype=torch.float64)
+
         if args_cli.obs_dump is not None:
             depth_sequence = _depth_sequence_from_history(depth_history, newest_index)
             dump_records.append(
@@ -726,6 +811,12 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
 
         obs, _, dones, _ = env.step(student_actions)
         dones_cpu = dones.bool().to(device="cpu")
+        if metrics_enabled:
+            dones_device = dones.bool().to(device=device)
+            fall_events += int(dones_device.sum().item())
+            first_now = dones_device & ~fallen_envs
+            first_fall_step[first_now] = step + 1
+            fallen_envs |= dones_device
         # Match the original DAgger: read sensor data and append a snapshot each control step.
         current_depth_cpu = _sanitize_depth_data(
             env, zero_depth=keyboard_controller.sensor_blind if keyboard_controller is not None else False
@@ -795,6 +886,55 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
             step_dt=np.float32(env.unwrapped.step_dt),
         )
         print(f"[INFO] Observation audit saved: {output} ({len(dump_records)} samples)")
+    if metrics_enabled:
+        output = os.path.abspath(os.path.expanduser(args_cli.eval_metrics_path))
+        os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
+        horizon_seconds = max_steps * env.unwrapped.step_dt
+        first_fall_seconds = first_fall_step.to(dtype=torch.float64) * env.unwrapped.step_dt
+        observed_first_fall = first_fall_seconds[first_fall_step >= 0]
+        metrics = {
+            "policy": os.path.abspath(eval_policy_path),
+            "checkpoint_step": int(ckpt.get("step", -1)),
+            "seed": int(env_cfg.seed),
+            "terrain": getattr(env_cfg, "terrain_type", None),
+            "stair_direction": args_cli.stair_direction,
+            "difficulty": getattr(env_cfg, "difficulty", None),
+            "command": [float(x) for x in args_cli.cmd.split()] if args_cli.cmd else None,
+            "with_training_noise": bool(args_cli.eval_with_training_noise),
+            "depth_noise": {
+                "blur_sigma": float(args_cli.depth_blur_sigma),
+                "additive_std": float(args_cli.depth_additive_noise_std) if args_cli.eval_with_training_noise else 0.0,
+                "dropout_prob": float(args_cli.depth_dropout_prob) if args_cli.eval_with_training_noise else 0.0,
+            },
+            "proprioceptive_noise": (
+                proprio_noise.cfg.to_dict() if proprio_noise is not None else None
+            ),
+            "num_envs": int(num_envs),
+            "steps": int(max_steps),
+            "warmup_steps": int(args_cli.eval_metrics_warmup_steps),
+            "step_dt": float(env.unwrapped.step_dt),
+            "horizon_seconds": float(horizon_seconds),
+            "fall_events": int(fall_events),
+            "fallen_envs": int(fallen_envs.sum().item()),
+            "survival_fraction": float((~fallen_envs).float().mean().item()),
+            "mean_first_fall_seconds": (
+                float(observed_first_fall.mean().item()) if observed_first_fall.numel() else None
+            ),
+            "action_rms": math.sqrt(action_sq_sum / max(action_count, 1)),
+            "action_abs_max": float(action_abs_max),
+            "action_delta_rms": math.sqrt(action_delta_sq_sum / max(action_delta_count, 1)),
+            "action_delta_abs_max": float(action_delta_abs_max),
+            "linear_velocity_abs_error": (
+                lin_vel_abs_error_sum / max(tracking_count, 1)
+            ).cpu().tolist(),
+            "yaw_rate_abs_error": float(yaw_rate_abs_error_sum / max(tracking_count, 1)),
+            "metric_steps": int(metric_steps),
+        }
+        with open(output, "w", encoding="utf-8") as file:
+            json.dump(metrics, file, indent=2, sort_keys=True)
+            file.write("\n")
+        print(f"[INFO] Evaluation metrics saved: {output}")
+        print(f"[INFO] Evaluation metrics: {json.dumps(metrics, sort_keys=True)}")
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
