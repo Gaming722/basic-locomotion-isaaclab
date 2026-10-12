@@ -416,14 +416,14 @@ def main():
                         help="fixed velocity command 'vx vy wz' for headless runs (default 0 0 0); "
                              "with --viewer the keyboard overrides it")
     parser.add_argument("--proprio_noise", action="store_true",
-                        help="enable the same zero-mean per-step proprioceptive Gaussian noise "
+                        help="enable the same zero-mean per-step proprioceptive uniform noise "
                              "used by noisy DAgger training; press N in the viewer to toggle")
     parser.add_argument("--proprio_noise_seed", type=int, default=0,
                         help="PyTorch RNG seed for reproducible proprioceptive noise (default: 0)")
-    parser.add_argument("--proprio_angular_velocity_std", type=float, default=0.02)
-    parser.add_argument("--proprio_projected_gravity_std", type=float, default=0.002)
-    parser.add_argument("--proprio_joint_position_std", type=float, default=0.001)
-    parser.add_argument("--proprio_joint_velocity_std", type=float, default=0.02)
+    parser.add_argument("--proprio_angular_velocity_amplitude", type=float, default=0.05)
+    parser.add_argument("--proprio_projected_gravity_amplitude", type=float, default=0.02)
+    parser.add_argument("--proprio_joint_position_amplitude", type=float, default=0.01)
+    parser.add_argument("--proprio_joint_velocity_amplitude", type=float, default=0.05)
     parser.add_argument("--no_depth_noise", action="store_true",
                         help="disable stochastic depth additive/dropout noise while preserving "
                              "checkpoint blur, clipping, sampling and delay")
@@ -450,14 +450,14 @@ def main():
         parser.error("--step_rise must be a positive finite value")
     if args.video_stride < 1:
         parser.error("--video_stride must be >= 1")
-    proprio_stds = (
-        args.proprio_angular_velocity_std,
-        args.proprio_projected_gravity_std,
-        args.proprio_joint_position_std,
-        args.proprio_joint_velocity_std,
+    proprio_amplitudes = (
+        args.proprio_angular_velocity_amplitude,
+        args.proprio_projected_gravity_amplitude,
+        args.proprio_joint_position_amplitude,
+        args.proprio_joint_velocity_amplitude,
     )
-    if any(not np.isfinite(value) or value < 0 for value in proprio_stds):
-        parser.error("proprioceptive noise standard deviations must be finite and nonnegative")
+    if any(not np.isfinite(value) or value < 0 for value in proprio_amplitudes):
+        parser.error("proprioceptive noise amplitudes must be finite and nonnegative")
     if args.no_act_delay and args.act_delay is not None:
         parser.error("choose --no_act_delay or --act_delay")
     if args.rl_entry_seconds is not None and (
@@ -658,16 +658,16 @@ def main():
     if not use_clock:
         torch.manual_seed(args.proprio_noise_seed)
         proprio_noise_cfg = ProprioNoiseCfg(
-            angular_velocity_std=args.proprio_angular_velocity_std,
-            projected_gravity_std=args.proprio_projected_gravity_std,
-            joint_position_std=args.proprio_joint_position_std,
-            joint_velocity_std=args.proprio_joint_velocity_std,
+            angular_velocity_half_range=args.proprio_angular_velocity_amplitude,
+            projected_gravity_half_range=args.proprio_projected_gravity_amplitude,
+            joint_position_half_range=args.proprio_joint_position_amplitude,
+            joint_velocity_half_range=args.proprio_joint_velocity_amplitude,
         )
         proprio_noise = ProprioceptiveNoise(
             num_envs=1, history_length=tcfg["history_length"], device="cpu",
             cfg=proprio_noise_cfg)
         print(f"[INFO] proprio noise={'ON' if args.proprio_noise else 'OFF'} "
-              f"seed={args.proprio_noise_seed} std={proprio_noise_cfg.to_dict()}")
+              f"seed={args.proprio_noise_seed} uniform_half_range={proprio_noise_cfg.to_dict()}")
     if args.viewer:
         initial_cmd = np.array([_vx, _vy, _wz])
         if not np.isfinite(initial_cmd).all():

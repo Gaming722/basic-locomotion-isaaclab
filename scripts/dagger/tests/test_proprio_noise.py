@@ -9,6 +9,13 @@ from proprio_noise import ProprioNoiseCfg, ProprioceptiveNoise
 
 
 class ProprioNoiseTests(unittest.TestCase):
+    def test_defaults_match_extreme_parkour_uniform_half_ranges(self):
+        cfg = ProprioNoiseCfg()
+        self.assertEqual(cfg.angular_velocity_half_range, 0.05)
+        self.assertEqual(cfg.projected_gravity_half_range, 0.02)
+        self.assertEqual(cfg.joint_position_half_range, 0.01)
+        self.assertEqual(cfg.joint_velocity_half_range, 0.05)
+
     def test_only_sensor_terms_are_corrupted_and_gravity_remains_unit(self):
         torch.manual_seed(7)
         clean = torch.zeros(3, 5, 45)
@@ -22,7 +29,7 @@ class ProprioNoiseTests(unittest.TestCase):
 
     def test_history_keeps_old_noise_and_reset_rebuilds_history(self):
         torch.manual_seed(11)
-        cfg = ProprioNoiseCfg(angular_velocity_std=0.1)
+        cfg = ProprioNoiseCfg(angular_velocity_half_range=0.1)
         noise = ProprioceptiveNoise(2, 5, "cpu", cfg)
         clean = torch.zeros(2, 5, 45)
         clean[..., 5] = -1.0
@@ -35,7 +42,18 @@ class ProprioNoiseTests(unittest.TestCase):
 
     def test_negative_noise_is_rejected(self):
         with self.assertRaises(ValueError):
-            ProprioNoiseCfg(joint_velocity_std=-0.1).validate()
+            ProprioNoiseCfg(joint_velocity_half_range=-0.1).validate()
+
+    def test_noise_is_bounded_by_configured_half_ranges(self):
+        torch.manual_seed(19)
+        clean = torch.zeros(512, 5, 45)
+        clean[..., 5] = -1.0
+        cfg = ProprioNoiseCfg()
+        noise = ProprioceptiveNoise(512, 5, "cpu", cfg)
+        result = noise.update(clean.reshape(512, -1)).reshape(512, 5, 45)
+        self.assertLessEqual(result[..., 0:3].abs().max(), cfg.angular_velocity_half_range)
+        self.assertLessEqual(result[..., 9:21].abs().max(), cfg.joint_position_half_range)
+        self.assertLessEqual(result[..., 21:33].abs().max(), cfg.joint_velocity_half_range)
 
     def test_zero_reset_padding_stays_zero(self):
         clean = torch.zeros(1, 5, 45)

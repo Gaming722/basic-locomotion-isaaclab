@@ -106,14 +106,14 @@ parser.add_argument(
     "--disable_proprio_noise", action="store_true", default=False,
     help="Disable student-only proprioceptive noise during DAgger training. Evaluation is always noise-free.",
 )
-parser.add_argument("--proprio_gyro_noise_std", type=float, default=0.02,
-                    help="Student angular-velocity white-noise std in rad/s.")
-parser.add_argument("--proprio_gravity_noise_std", type=float, default=0.002,
-                    help="Student projected-gravity component white-noise std; vector is renormalized.")
-parser.add_argument("--proprio_joint_pos_noise_std", type=float, default=0.001,
-                    help="Student joint-position white-noise std in rad.")
-parser.add_argument("--proprio_joint_vel_noise_std", type=float, default=0.02,
-                    help="Student joint-velocity white-noise std in rad/s.")
+parser.add_argument("--proprio_gyro_noise_amplitude", type=float, default=0.05,
+                    help="Student angular-velocity uniform-noise half-range in rad/s.")
+parser.add_argument("--proprio_gravity_noise_amplitude", type=float, default=0.02,
+                    help="Student projected-gravity component uniform-noise half-range; vector is renormalized.")
+parser.add_argument("--proprio_joint_pos_noise_amplitude", type=float, default=0.01,
+                    help="Student joint-position uniform-noise half-range in rad.")
+parser.add_argument("--proprio_joint_vel_noise_amplitude", type=float, default=0.05,
+                    help="Student joint-velocity uniform-noise half-range in rad/s.")
 parser.add_argument(
     "--dagger_buffer_size",
     type=int,
@@ -687,11 +687,21 @@ def _run_student_eval(env, eval_policy_path: str, video_out_dir: str) -> None:
     proprio_noise = None
     if args_cli.eval_with_training_noise:
         noise_metadata = ckpt.get("metadata", {}).get("proprioceptive_noise", {})
+        legacy_gaussian = noise_metadata.get("model") == "per_step_zero_mean_gaussian"
         proprio_noise_cfg = ProprioNoiseCfg(
-            angular_velocity_std=float(noise_metadata.get("angular_velocity_std", args_cli.proprio_gyro_noise_std)),
-            projected_gravity_std=float(noise_metadata.get("projected_gravity_std", args_cli.proprio_gravity_noise_std)),
-            joint_position_std=float(noise_metadata.get("joint_position_std", args_cli.proprio_joint_pos_noise_std)),
-            joint_velocity_std=float(noise_metadata.get("joint_velocity_std", args_cli.proprio_joint_vel_noise_std)),
+            distribution="gaussian" if legacy_gaussian else "uniform",
+            angular_velocity_half_range=float(noise_metadata.get(
+                "angular_velocity_half_range",
+                noise_metadata.get("angular_velocity_std", args_cli.proprio_gyro_noise_amplitude))),
+            projected_gravity_half_range=float(noise_metadata.get(
+                "projected_gravity_half_range",
+                noise_metadata.get("projected_gravity_std", args_cli.proprio_gravity_noise_amplitude))),
+            joint_position_half_range=float(noise_metadata.get(
+                "joint_position_half_range",
+                noise_metadata.get("joint_position_std", args_cli.proprio_joint_pos_noise_amplitude))),
+            joint_velocity_half_range=float(noise_metadata.get(
+                "joint_velocity_half_range",
+                noise_metadata.get("joint_velocity_std", args_cli.proprio_joint_vel_noise_amplitude))),
         )
         proprio_noise = ProprioceptiveNoise(
             num_envs, env.unwrapped.cfg.history_length, device, proprio_noise_cfg
@@ -1117,10 +1127,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     num_fixed_command_envs = get_num_fixed_command_envs(env.unwrapped.cfg, num_envs)
 
     proprio_noise_cfg = ProprioNoiseCfg(
-        angular_velocity_std=args_cli.proprio_gyro_noise_std,
-        projected_gravity_std=args_cli.proprio_gravity_noise_std,
-        joint_position_std=args_cli.proprio_joint_pos_noise_std,
-        joint_velocity_std=args_cli.proprio_joint_vel_noise_std,
+        angular_velocity_half_range=args_cli.proprio_gyro_noise_amplitude,
+        projected_gravity_half_range=args_cli.proprio_gravity_noise_amplitude,
+        joint_position_half_range=args_cli.proprio_joint_pos_noise_amplitude,
+        joint_velocity_half_range=args_cli.proprio_joint_vel_noise_amplitude,
     )
     proprio_noise_cfg.validate()
     use_proprio_noise = not args_cli.disable_proprio_noise and not args_cli.eval
@@ -1187,7 +1197,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         },
         "proprioceptive_noise": {
             "enabled_during_training": use_proprio_noise,
-            "model": "per_step_zero_mean_gaussian",
+            "model": "per_step_zero_mean_uniform",
             "noisy_terms": ("angular_velocity", "projected_gravity", "joint_position", "joint_velocity"),
             "clean_terms": ("command", "previous_raw_action"),
             **proprio_noise_cfg.to_dict(),
@@ -1211,9 +1221,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         f"depth_fps={args_cli.depth_fps}, depth_delay={args_cli.depth_delay_frames} control step(s), depth_blur_sigma={args_cli.depth_blur_sigma}, "
         f"depth_additive_std={args_cli.depth_additive_noise_std}, depth_dropout={args_cli.depth_dropout_prob}, "
         f"proprio_noise={'on' if use_proprio_noise else 'off'}, "
-        f"proprio_std=[gyro={proprio_noise_cfg.angular_velocity_std}, "
-        f"gravity={proprio_noise_cfg.projected_gravity_std}, q={proprio_noise_cfg.joint_position_std}, "
-        f"dq={proprio_noise_cfg.joint_velocity_std}], "
+        f"proprio_uniform_half_range=[gyro={proprio_noise_cfg.angular_velocity_half_range}, "
+        f"gravity={proprio_noise_cfg.projected_gravity_half_range}, q={proprio_noise_cfg.joint_position_half_range}, "
+        f"dq={proprio_noise_cfg.joint_velocity_half_range}], "
         f"buffer={args_cli.dagger_buffer_size}, batch={args_cli.dagger_batch_size}, "
         f"train_micro_batch={args_cli.dagger_train_micro_batch_size}, "
         f"inference_batch={args_cli.dagger_inference_batch_size}, amp={_use_cuda_amp(device)}, "

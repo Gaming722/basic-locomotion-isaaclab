@@ -21,19 +21,27 @@ JOINT_VELOCITY = slice(21, 33)
 
 @dataclass(frozen=True)
 class ProprioNoiseCfg:
-    """Per-step zero-mean Gaussian white-noise standard deviations."""
+    """Per-step zero-mean uniform white-noise half-ranges.
 
-    angular_velocity_std: float = 0.02
-    projected_gravity_std: float = 0.002
-    joint_position_std: float = 0.001
-    joint_velocity_std: float = 0.02
+    Defaults reproduce Extreme-Parkour's configured ranges exactly.
+    """
+
+    distribution: str = "uniform"
+    angular_velocity_half_range: float = 0.05
+    projected_gravity_half_range: float = 0.02
+    joint_position_half_range: float = 0.01
+    joint_velocity_half_range: float = 0.05
 
     def validate(self) -> None:
+        if self.distribution not in ("uniform", "gaussian"):
+            raise ValueError(f"Unsupported proprioceptive noise distribution: {self.distribution}")
         for name, value in asdict(self).items():
+            if name == "distribution":
+                continue
             if value < 0:
                 raise ValueError(f"{name} must be non-negative, got {value}")
 
-    def to_dict(self) -> dict[str, float]:
+    def to_dict(self) -> dict[str, float | str]:
         return asdict(self)
 
 
@@ -60,14 +68,20 @@ class ProprioceptiveNoise:
         valid_frame = frames[..., PROJECTED_GRAVITY].norm(dim=-1, keepdim=True) > 0.5
         noisy = frames.clone()
         terms = (
-            (ANGULAR_VELOCITY, self.cfg.angular_velocity_std),
-            (PROJECTED_GRAVITY, self.cfg.projected_gravity_std),
-            (JOINT_POSITION, self.cfg.joint_position_std),
-            (JOINT_VELOCITY, self.cfg.joint_velocity_std),
+            (ANGULAR_VELOCITY, self.cfg.angular_velocity_half_range),
+            (PROJECTED_GRAVITY, self.cfg.projected_gravity_half_range),
+            (JOINT_POSITION, self.cfg.joint_position_half_range),
+            (JOINT_VELOCITY, self.cfg.joint_velocity_half_range),
         )
-        for indices, std in terms:
-            if std > 0:
-                noisy[..., indices] += torch.randn_like(noisy[..., indices]) * std
+        for indices, half_range in terms:
+            if half_range > 0:
+                if self.cfg.distribution == "uniform":
+                    sample = 2.0 * torch.rand_like(noisy[..., indices]) - 1.0
+                else:
+                    # Compatibility path for evaluating checkpoints trained with
+                    # the earlier Gaussian schema; the stored value is its std.
+                    sample = torch.randn_like(noisy[..., indices])
+                noisy[..., indices] += sample * half_range
 
         # Projected gravity is a direction vector; component noise must not alter its norm.
         gravity = noisy[..., PROJECTED_GRAVITY]
