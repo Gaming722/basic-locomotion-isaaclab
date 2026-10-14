@@ -117,9 +117,13 @@ parser.add_argument("--proprio_joint_vel_noise_amplitude", type=float, default=0
 parser.add_argument(
     "--dagger_buffer_size",
     type=int,
-    default=8192,
-    help="Maximum number of aggregated in-memory DAgger samples.",
+    default=32768,
+    help="Long-term reservoir capacity. At 106x60x5 float16 depth this uses about 2.1 GB of host RAM.",
 )
+parser.add_argument("--dagger_recent_buffer_size", type=int, default=8192,
+                    help="FIFO capacity used to keep recent on-policy recovery states.")
+parser.add_argument("--dagger_recent_fraction", type=float, default=0.5,
+                    help="Fraction of each training batch sampled from the recent FIFO buffer.")
 parser.add_argument(
     "--dagger_samples_per_step",
     type=int,
@@ -139,7 +143,15 @@ parser.add_argument(
     default=128,
     help="Maximum number of student-controlled environments evaluated on GPU at once.",
 )
-parser.add_argument("--dagger_learning_rate", type=float, default=3e-4, help="Student optimizer learning rate.")
+parser.add_argument("--dagger_learning_rate", type=float, default=1e-4, help="Initial student learning rate.")
+parser.add_argument("--dagger_min_learning_rate", type=float, default=3e-5,
+                    help="Learning-rate floor after linear decay.")
+parser.add_argument("--dagger_lr_decay_steps", type=int, default=300000,
+                    help="Simulator steps over which learning rate decays linearly to its floor.")
+parser.add_argument("--dagger_consistency_weight", type=float, default=0.1,
+                    help="Weight for action consistency between two independent noisy views of one clean state.")
+parser.add_argument("--proprio_delay_prob", type=float, default=0.5,
+                    help="Probability per environment of delaying measured proprioceptive terms by one 20-ms policy step.")
 parser.add_argument(
     "--disable_dagger_amp",
     action="store_true",
@@ -330,7 +342,12 @@ from dagger_network import DaggerNet, DaggerReplayBuffer
 from keyboard_control import install_isaac_keyboard_commands
 from depth_pipeline import PIPELINE_VERSION, preprocess_depth, depth_sequence_from_history, student_depth_grayscale
 from depth_preview import IsaacDepthPreview
-from proprio_noise import ProprioNoiseCfg, ProprioceptiveNoise
+from proprio_noise import (
+    ProprioNoiseCfg,
+    ProprioceptiveNoise,
+    corrupt_common_observation,
+    delay_sensor_terms,
+)
 from video_follow import rotating_video_env
 
 import isaaclab.utils.math as math_utils
@@ -1010,6 +1027,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         raise ValueError("--dagger_updates_per_train must be positive.")
     if args_cli.dagger_batch_size <= 0:
         raise ValueError("--dagger_batch_size must be positive.")
+    if args_cli.dagger_buffer_size <= 0 or args_cli.dagger_recent_buffer_size <= 0:
+        raise ValueError("Both DAgger replay capacities must be positive.")
+    if not 0.0 <= args_cli.dagger_recent_fraction <= 1.0:
+        raise ValueError("--dagger_recent_fraction must be in [0, 1].")
+    if not 0.0 <= args_cli.proprio_delay_prob <= 1.0:
+        raise ValueError("--proprio_delay_prob must be in [0, 1].")
+    if args_cli.dagger_consistency_weight < 0:
+        raise ValueError("--dagger_consistency_weight must be non-negative.")
+    if not 0 < args_cli.dagger_min_learning_rate <= args_cli.dagger_learning_rate:
+        raise ValueError("Require 0 < --dagger_min_learning_rate <= --dagger_learning_rate.")
     if args_cli.dagger_train_micro_batch_size <= 0:
         raise ValueError("--dagger_train_micro_batch_size must be positive.")
     if args_cli.dagger_inference_batch_size <= 0:
@@ -1148,10 +1175,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         output_size=action_size,
         depth_channels=depth_channels,
     ).to(device)
-    optimizer = torch.optim.AdamW(dagger_net.parameters(), lr=args_cli.dagger_learning_rate)
+    optimizer = torch.optim.AdamW(
+        dagger_net.parameters(), lr=args_cli.dagger_learning_rate, weight_decay=0.0
+    )
     grad_scaler = torch.cuda.amp.GradScaler(enabled=_use_cuda_amp(device))
     loss_fn = torch.nn.MSELoss()
-    replay_buffer = DaggerReplayBuffer(capacity=args_cli.dagger_buffer_size)
+    replay_buffer = DaggerReplayBuffer(capacity=args_cli.dagger_buffer_size, reservoir=True)
+    recent_replay_buffer = DaggerReplayBuffer(capacity=args_cli.dagger_recent_buffer_size)
     recent_losses: deque[float] = deque(maxlen=100)
 
     policy_path = (
@@ -1213,6 +1243,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "dagger_amp": _use_cuda_amp(device),
         "dagger_train_micro_batch_size": args_cli.dagger_train_micro_batch_size,
         "dagger_inference_batch_size": args_cli.dagger_inference_batch_size,
+        "dagger_replay": {
+            "long_term_capacity": args_cli.dagger_buffer_size,
+            "long_term_retention": "reservoir",
+            "recent_capacity": args_cli.dagger_recent_buffer_size,
+            "recent_fraction": args_cli.dagger_recent_fraction,
+        },
+        "dagger_consistency_weight": args_cli.dagger_consistency_weight,
+        "proprio_delay_steps": (0, 1),
+        "proprio_delay_probability": args_cli.proprio_delay_prob,
+        "policy_action_delay_steps": (0, int(env_cfg.policy_action_delay_max_steps)),
+        "optimizer": {
+            "name": "AdamW", "weight_decay": 0.0,
+            "initial_lr": args_cli.dagger_learning_rate,
+            "minimum_lr": args_cli.dagger_min_learning_rate,
+            "linear_decay_steps": args_cli.dagger_lr_decay_steps,
+        },
     }
 
     print(
@@ -1224,7 +1270,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         f"proprio_uniform_half_range=[gyro={proprio_noise_cfg.angular_velocity_half_range}, "
         f"gravity={proprio_noise_cfg.projected_gravity_half_range}, q={proprio_noise_cfg.joint_position_half_range}, "
         f"dq={proprio_noise_cfg.joint_velocity_half_range}], "
-        f"buffer={args_cli.dagger_buffer_size}, batch={args_cli.dagger_batch_size}, "
+        f"reservoir={args_cli.dagger_buffer_size}, recent={args_cli.dagger_recent_buffer_size}, "
+        f"recent_fraction={args_cli.dagger_recent_fraction}, batch={args_cli.dagger_batch_size}, "
         f"train_micro_batch={args_cli.dagger_train_micro_batch_size}, "
         f"inference_batch={args_cli.dagger_inference_batch_size}, amp={_use_cuda_amp(device)}, "
         f"command_a={env_cfg.command_a}, fixed_command_envs={num_fixed_command_envs})."
@@ -1244,6 +1291,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     step = 0
     updates = 0
     dones_cpu = torch.zeros(num_envs, dtype=torch.bool, device="cpu")
+    proprio_delay_mask = torch.rand(num_envs, device=device) < args_cli.proprio_delay_prob
 
     # resume from a previous run if requested
     if args_cli.resume_from:
@@ -1254,6 +1302,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _check_student_ckpt_compat(ckpt, dagger_net, tuple(current_depth_cpu.shape[-2:]))
         dagger_net.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        for group in optimizer.param_groups:
+            group["weight_decay"] = 0.0
         step = int(ckpt["step"])
         updates = int(ckpt["updates"])
         print(
@@ -1264,7 +1314,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     while simulation_app.is_running() and (
         args_cli.max_training_steps is None or step < args_cli.max_training_steps
     ):
-        clean_common_obs = obs["common"]
+        clean_common_obs = delay_sensor_terms(obs["common"], proprio_delay_mask)
         common_obs = (
             proprio_noise.update(clean_common_obs, dones_cpu)
             if proprio_noise is not None else clean_common_obs
@@ -1311,11 +1361,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             env_indices=replay_env_indices_cpu,
         )
         if replay_env_indices_cpu is None:
-            replay_common_cpu = common_obs.detach().to(device="cpu", dtype=torch.float32)
+            replay_common_cpu = clean_common_obs.detach().to(device="cpu", dtype=torch.float32)
             replay_expert_cpu = expert_actions.detach().to(device="cpu", dtype=torch.float32)
         else:
             replay_env_indices_gpu = replay_env_indices_cpu.to(device=device)
-            replay_common_cpu = common_obs.index_select(0, replay_env_indices_gpu).detach().to(
+            replay_common_cpu = clean_common_obs.index_select(0, replay_env_indices_gpu).detach().to(
                 device="cpu", dtype=torch.float32
             )
             replay_expert_cpu = expert_actions.index_select(0, replay_env_indices_gpu).detach().to(
@@ -1327,10 +1377,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             common_obs=replay_common_cpu,
             expert_actions=replay_expert_cpu,
         )
+        recent_replay_buffer.add_batch(
+            depth_sequences=replay_depth_cpu,
+            common_obs=replay_common_cpu,
+            expert_actions=replay_expert_cpu,
+        )
         del replay_depth_cpu, replay_common_cpu, replay_expert_cpu
 
         obs, _, dones, _ = env.step(actions)
         dones_cpu = dones.bool().to(device="cpu")
+        if dones_cpu.any():
+            reset_ids = dones_cpu.nonzero(as_tuple=False).flatten().to(device=device)
+            proprio_delay_mask[reset_ids] = (
+                torch.rand(reset_ids.numel(), device=device) < args_cli.proprio_delay_prob
+            )
         # Match the original DAgger: read sensor data and append a snapshot each control step.
         current_depth_cpu = _sanitize_depth_data(env).detach().to(device="cpu", dtype=torch.float16)
         history_index = (history_index + 1) % history_capacity
@@ -1379,10 +1439,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if len(replay_buffer) >= args_cli.dagger_batch_size and step % args_cli.dagger_train_every == 0:
             dagger_net.train()
             for _ in range(args_cli.dagger_updates_per_train):
-                batch_depth, batch_common, batch_expert = replay_buffer.sample(
-                    batch_size=args_cli.dagger_batch_size,
-                    device="cpu",
+                recent_count = int(round(args_cli.dagger_batch_size * args_cli.dagger_recent_fraction))
+                recent_count = min(recent_count, args_cli.dagger_batch_size)
+                long_count = args_cli.dagger_batch_size - recent_count
+                pieces = []
+                if long_count:
+                    pieces.append(replay_buffer.sample(batch_size=long_count, device="cpu"))
+                if recent_count:
+                    pieces.append(recent_replay_buffer.sample(batch_size=recent_count, device="cpu"))
+                batch_depth = torch.cat([piece[0] for piece in pieces], dim=0)
+                batch_common = torch.cat([piece[1] for piece in pieces], dim=0)
+                batch_expert = torch.cat([piece[2] for piece in pieces], dim=0)
+
+                decay_progress = min(1.0, step / max(1, args_cli.dagger_lr_decay_steps))
+                current_lr = (
+                    args_cli.dagger_learning_rate
+                    + decay_progress * (args_cli.dagger_min_learning_rate - args_cli.dagger_learning_rate)
                 )
+                for group in optimizer.param_groups:
+                    group["lr"] = current_lr
 
                 optimizer.zero_grad(set_to_none=True)
                 total_loss = 0.0
@@ -1391,12 +1466,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     micro_batch_size = stop - start
 
                     micro_depth = batch_depth[start:stop].to(device=device, dtype=torch.float32, non_blocking=True)
-                    micro_common = batch_common[start:stop].to(device=device, non_blocking=True)
+                    micro_common_clean = batch_common[start:stop].to(device=device, non_blocking=True)
                     micro_expert = batch_expert[start:stop].to(device=device, non_blocking=True)
+
+                    if proprio_noise is not None:
+                        micro_common = corrupt_common_observation(micro_common_clean, proprio_noise_cfg)
+                        micro_common_second = corrupt_common_observation(micro_common_clean, proprio_noise_cfg)
+                    else:
+                        micro_common = micro_common_clean
+                        micro_common_second = micro_common_clean
 
                     with _autocast_context(device):
                         predicted_actions, _ = dagger_net(micro_depth, micro_common, hidden=None)
-                        micro_loss = loss_fn(predicted_actions.float(), micro_expert)
+                        if args_cli.dagger_consistency_weight > 0:
+                            second_actions, _ = dagger_net(micro_depth, micro_common_second, hidden=None)
+                            bc_loss = 0.5 * (
+                                loss_fn(predicted_actions.float(), micro_expert)
+                                + loss_fn(second_actions.float(), micro_expert)
+                            )
+                            consistency_loss = loss_fn(predicted_actions.float(), second_actions.float())
+                            micro_loss = bc_loss + args_cli.dagger_consistency_weight * consistency_loss
+                        else:
+                            second_actions = None
+                            consistency_loss = None
+                            bc_loss = loss_fn(predicted_actions.float(), micro_expert)
+                            micro_loss = bc_loss
 
                     weighted_loss = micro_loss * (micro_batch_size / args_cli.dagger_batch_size)
                     if grad_scaler.is_enabled():
@@ -1405,7 +1499,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         weighted_loss.backward()
 
                     total_loss += micro_loss.item() * micro_batch_size
-                    del micro_depth, micro_common, micro_expert, predicted_actions, micro_loss, weighted_loss
+                    del micro_depth, micro_common_clean, micro_common, micro_common_second
+                    del micro_expert, predicted_actions, second_actions, consistency_loss, bc_loss, micro_loss, weighted_loss
 
                 if grad_scaler.is_enabled():
                     grad_scaler.unscale_(optimizer)
@@ -1423,8 +1518,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if step % 1000 == 0:
             mean_loss = sum(recent_losses) / len(recent_losses) if recent_losses else float("nan")
             print(
-                f"[INFO] step={step} updates={updates} buffer={len(replay_buffer)} "
-                f"teacher_beta={beta:.3f} recent_bc_loss={mean_loss:.5f}"
+                f"[INFO] step={step} updates={updates} reservoir={len(replay_buffer)} "
+                f"recent={len(recent_replay_buffer)} teacher_beta={beta:.3f} "
+                f"lr={optimizer.param_groups[0]['lr']:.2e} recent_total_loss={mean_loss:.5f}"
             )
 
         if args_cli.dagger_save_interval > 0 and step % args_cli.dagger_save_interval == 0:

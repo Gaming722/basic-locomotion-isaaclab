@@ -5,7 +5,12 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from proprio_noise import ProprioNoiseCfg, ProprioceptiveNoise
+from proprio_noise import (
+    ProprioNoiseCfg,
+    ProprioceptiveNoise,
+    corrupt_common_observation,
+    delay_sensor_terms,
+)
 
 
 class ProprioNoiseTests(unittest.TestCase):
@@ -62,6 +67,24 @@ class ProprioNoiseTests(unittest.TestCase):
         result = noise.update(clean.reshape(1, -1)).reshape(1, 5, 45)
         torch.testing.assert_close(result[:, :-1], clean[:, :-1])
         self.assertFalse(torch.equal(result[:, -1], clean[:, -1]))
+
+    def test_stateless_replay_corruption_preserves_local_terms(self):
+        clean = torch.zeros(4, 5, 45)
+        clean[..., 5] = -1.0
+        clean[..., 6:9] = 0.25
+        clean[..., 33:45] = 0.5
+        result = corrupt_common_observation(clean.reshape(4, -1), ProprioNoiseCfg()).reshape(4, 5, 45)
+        torch.testing.assert_close(result[..., 6:9], clean[..., 6:9])
+        torch.testing.assert_close(result[..., 33:45], clean[..., 33:45])
+
+    def test_sensor_delay_keeps_commands_and_actions_current(self):
+        frames = torch.arange(2 * 5 * 45, dtype=torch.float32).reshape(2, 5, 45)
+        result = delay_sensor_terms(frames.reshape(2, -1), torch.tensor([True, False])).reshape(2, 5, 45)
+        torch.testing.assert_close(result[0, 1:, 0:6], frames[0, :-1, 0:6])
+        torch.testing.assert_close(result[0, 1:, 9:33], frames[0, :-1, 9:33])
+        torch.testing.assert_close(result[0, :, 6:9], frames[0, :, 6:9])
+        torch.testing.assert_close(result[0, :, 33:45], frames[0, :, 33:45])
+        torch.testing.assert_close(result[1], frames[1])
 
 
 if __name__ == "__main__":

@@ -6,9 +6,9 @@ from torch import Tensor
 
 
 class DaggerReplayBuffer:
-    """Fixed-size CPU aggregation buffer for DAgger supervision."""
+    """Fixed-size CPU DAgger buffer supporting FIFO or reservoir retention."""
 
-    def __init__(self, capacity: int, depth_dtype: torch.dtype = torch.float16):
+    def __init__(self, capacity: int, depth_dtype: torch.dtype = torch.float16, *, reservoir: bool = False):
         if capacity <= 0:
             raise ValueError("DaggerReplayBuffer capacity must be positive.")
 
@@ -16,6 +16,8 @@ class DaggerReplayBuffer:
         self.depth_dtype = depth_dtype
         self.size = 0
         self.next_idx = 0
+        self.total_seen = 0
+        self.reservoir = reservoir
         self._depth_sequences: Tensor | None = None
         self._common_obs: Tensor | None = None
         self._expert_actions: Tensor | None = None
@@ -51,7 +53,8 @@ class DaggerReplayBuffer:
         sample_count = batch_size
         if max_samples is not None and max_samples > 0:
             sample_count = min(sample_count, max_samples)
-        sample_count = min(sample_count, self.capacity)
+        if not self.reservoir:
+            sample_count = min(sample_count, self.capacity)
 
         if sample_count < batch_size:
             selected_indices = torch.randperm(batch_size, device=depth_sequences.device)[:sample_count]
@@ -62,13 +65,33 @@ class DaggerReplayBuffer:
         if self._depth_sequences is None or self._common_obs is None or self._expert_actions is None:
             self._lazy_init(depth_sequences=depth_sequences, common_obs=common_obs, expert_actions=expert_actions)
 
-        write_indices = (torch.arange(sample_count) + self.next_idx) % self.capacity
-        self._depth_sequences[write_indices] = depth_sequences.detach().to("cpu", dtype=self.depth_dtype)
-        self._common_obs[write_indices] = common_obs.detach().to("cpu", dtype=torch.float32)
-        self._expert_actions[write_indices] = expert_actions.detach().to("cpu", dtype=torch.float32)
-
-        self.next_idx = (self.next_idx + sample_count) % self.capacity
-        self.size = min(self.capacity, self.size + sample_count)
+        depth_sequences = depth_sequences.detach().to("cpu", dtype=self.depth_dtype)
+        common_obs = common_obs.detach().to("cpu", dtype=torch.float32)
+        expert_actions = expert_actions.detach().to("cpu", dtype=torch.float32)
+        if self.reservoir:
+            # Algorithm R: after filling, every previously seen sample has the same
+            # probability of remaining in the long-term buffer.
+            for source_index in range(sample_count):
+                seen_index = self.total_seen
+                if self.size < self.capacity:
+                    target_index = self.size
+                    self.size += 1
+                else:
+                    candidate = int(torch.randint(0, seen_index + 1, ()).item())
+                    target_index = candidate if candidate < self.capacity else -1
+                if target_index >= 0:
+                    self._depth_sequences[target_index].copy_(depth_sequences[source_index])
+                    self._common_obs[target_index].copy_(common_obs[source_index])
+                    self._expert_actions[target_index].copy_(expert_actions[source_index])
+                self.total_seen += 1
+        else:
+            write_indices = (torch.arange(sample_count) + self.next_idx) % self.capacity
+            self._depth_sequences[write_indices] = depth_sequences
+            self._common_obs[write_indices] = common_obs
+            self._expert_actions[write_indices] = expert_actions
+            self.next_idx = (self.next_idx + sample_count) % self.capacity
+            self.size = min(self.capacity, self.size + sample_count)
+            self.total_seen += sample_count
         return sample_count
 
     def sample(self, batch_size: int, device: torch.device | str) -> tuple[Tensor, Tensor, Tensor]:

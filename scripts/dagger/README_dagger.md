@@ -55,9 +55,9 @@ python scripts/dagger/train_dagger_go1.py \
 - **`--headless` is required** on a no-display server. The script uses
   `AppLauncher(args_cli)`, so `headless` comes from this CLI flag — without it the
   rendering kit tries to open a window and hangs.
-- The DAgger student keeps the teacher's standing-command ratio: `500/4096`
-  (about 12.2%) of the leading envs receive a zero command. With 1024 envs this
-  means envs 0-124 stand and envs 125+ move. `--follow_env` is automatically
+- The DAgger student deliberately assigns 30% of environments a standing command,
+  because deployment always enters RL from a stationary stand. With 1024 envs this
+  means envs 0-306 stand and envs 307+ move. `--follow_env` is automatically
   clamped onto a moving env. The Tiled terrain is 46x46 sub-terrains (max 2116 envs).
 - The TiledCamera student env requires the rendering kit; the script forces
   `--enable_cameras`.
@@ -91,12 +91,20 @@ below). If no `--checkpoint`/`--load_run` is given, the script auto-selects the
 - `--dual_pane_student_depth`: the right dual-pane shows the **student actor's
   sanitized depth** (nan_to_num + clip [0.1, 2.0] + depth_min_z mask) instead of the
   raw camera depth — i.e. exactly what feeds the student GRU.
-- DAgger defaults are tuned for the 1024-env GO1 RayCaster workload:
-  `--dagger_buffer_size 8192`, `--dagger_samples_per_step 32`,
+- DAgger uses a long-term reservoir plus a recent FIFO so old recovery states are
+  not forgotten: `--dagger_buffer_size 32768`, `--dagger_recent_buffer_size 8192`,
+  `--dagger_recent_fraction 0.5`, `--dagger_samples_per_step 32`,
   `--dagger_batch_size 128`, `--dagger_train_micro_batch_size 64`, and
   `--dagger_inference_batch_size 128`. With the default `--dagger_train_every 4`
-  and `--dagger_updates_per_train 1`, the replay ratio is 1.0 and the full buffer
-  spans 256 control steps. Teacher action mixing decays over 20000 steps by default.
+  and `--dagger_updates_per_train 1`, the replay ratio is 1.0. The long-term depth
+  reservoir uses about 2.1 GB of host RAM and the recent FIFO about 0.52 GB.
+  Teacher action mixing decays over 20000 steps by default.
+- The optimizer starts at `1e-4`, linearly decays to `3e-5` over 300k simulator
+  steps, and uses no weight decay. Replay stores clean proprioception and creates
+  two noisy views per sample; a consistency loss discourages noise-sensitive actions.
+- Half the environments hold measured proprioceptive fields back by one 20-ms
+  policy step, and DAgger environments randomize an additional 0/1-step actuator
+  target delay per episode. Commands and previous raw actions remain current.
 - Both GO1 DAgger student environments sample safer depth-policy commands from
   `vx in [-0.8, 0.8] m/s`, `vy in [-0.4, 0.4] m/s`, and
   `yaw in [-0.8, 0.8] rad/s`. The teacher environment keeps its original wider range.
@@ -110,8 +118,8 @@ By default the student depth is passed through a small D435-like sensor model (i
   smoothing of the real D435 848→106 (8× area-average) downscale / optics. The depth
   is now rendered at native 106×60 (= 848×480 / 8, exact aspect), so there is **no**
   in-sim 848→240 downscale to smooth any more. `0` disables.
-- `--depth_additive_noise_std` (default `0.0` m): additive Gaussian depth noise.
-- `--depth_dropout_prob` (default `0.0`): probability of dropping a pixel to the
+- `--depth_additive_noise_std` (default `0.01` m): additive Gaussian depth noise.
+- `--depth_dropout_prob` (default `0.01`): probability of dropping a pixel to the
   far-saturation code `2.0` (simulates D435 holes / invalid depth).
 - `--depth_delay_frames` (default `1`): delays the depth fed to the student by N
   control steps, modelling capture→inference latency. Additional buffer slots preserve the full history.

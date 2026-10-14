@@ -133,6 +133,9 @@ class Go1FlatEnvCfg(DirectRLEnvCfg):
     terrain_curriculum_move_down_error_percent = 50.0
     decimation = 5   # 5 physics substeps per control step (0.02 s / 0.004 s), matches mujoco_playground GO1
     action_scale = 0.5
+    # Additional whole-policy-step target latency. Standard teacher environments
+    # keep zero; DAgger deployment environments override this for sim-to-real.
+    policy_action_delay_max_steps = 0
     action_space = 12
     # DAgger student envs (Go1RoughVisionTiledEnvCfg) set this False: the real robot has
     # no base_lin_vel, so it is excluded from the obs and the history buffer dimension.
@@ -822,11 +825,12 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
     use_lin_vel_obs = False       # student obs: no base_lin_vel (real robot has no odometry)
     emit_teacher_obs = True       # emit teacher_obs (sim base_lin_vel + heightmap) for the expert
     enforce_env_spacing = True    # one robot per sub-terrain so depth can't see neighbours
-    # Match the teacher's command distribution: its default 4096-env training keeps
-    # the first 500 envs stationary. At 1024 student envs this produces 125, not 500.
-    fixed_command_zero_ratio = 500.0 / 4096.0
+    # Deployment always enters RL from a stationary stand. Deliberately oversample
+    # this safety-critical regime relative to the teacher's original 500/4096 mix.
+    fixed_command_zero_ratio = 0.30
     # Safer perceptive-locomotion commands for the depth student (vx, vy, yaw rate).
     command_a = [0.8, 0.4, 0.8]
+    policy_action_delay_max_steps = 1
     # viewer env_index=500 assumes >=501 envs; use 0 so the Tiled env works at low num_envs.
     viewer: ViewerCfg = ViewerCfg(
         eye=(-3.0, 1.2, 1.8),
@@ -881,8 +885,9 @@ class Go1RoughVisionRayCasterEnvCfg(Go1RoughVisionEnvCfg):
     # ---- DAgger student flags (mirror Go1RoughVisionTiledEnvCfg) ----
     use_lin_vel_obs = False       # student obs: no base_lin_vel (real robot has no odometry)
     emit_teacher_obs = True       # emit teacher_obs (sim base_lin_vel + heightmap) for the expert
-    fixed_command_zero_ratio = 500.0 / 4096.0
+    fixed_command_zero_ratio = 0.30
     command_a = [0.8, 0.4, 0.8]
+    policy_action_delay_max_steps = 1
 
     # ---- terrain_type / difficulty / rebuild_terrain (train_dagger_go1.py depends on this API) ----
     terrain_type: str = "rough"   # rough | stairs | slope | flat (for --terrain recording)

@@ -108,3 +108,35 @@ class ProprioceptiveNoise:
             self.history.index_copy_(0, env_ids, self._corrupt(reset_clean))
 
         return self.history.reshape(self.num_envs, expected)
+
+
+def corrupt_common_observation(clean_common: torch.Tensor, cfg: ProprioNoiseCfg) -> torch.Tensor:
+    """Apply an independent corruption to a flattened proprioceptive history.
+
+    This is used for replay augmentation: replay stores the clean state and creates
+    fresh noisy views when sampled, instead of permanently baking one lucky noise
+    realization into every stored target.
+    """
+    if clean_common.ndim != 2 or clean_common.shape[-1] % FRAME_SIZE != 0:
+        raise ValueError(f"Expected flattened [N, T*{FRAME_SIZE}] observations, got {clean_common.shape}")
+    history_length = clean_common.shape[-1] // FRAME_SIZE
+    helper = ProprioceptiveNoise(clean_common.shape[0], history_length, clean_common.device, cfg)
+    return helper._corrupt(clean_common.reshape(-1, history_length, FRAME_SIZE)).reshape_as(clean_common)
+
+
+def delay_sensor_terms(common: torch.Tensor, delay_mask: torch.Tensor) -> torch.Tensor:
+    """Delay only measured sensor terms by one policy step for selected environments.
+
+    Commands and previous actions are locally known and therefore stay current.  The
+    oldest frame is repeated, matching a zero-order-held sensor stream.
+    """
+    if common.ndim != 2 or common.shape[-1] % FRAME_SIZE != 0:
+        raise ValueError(f"Expected flattened [N, T*{FRAME_SIZE}] observations, got {common.shape}")
+    if delay_mask.shape != (common.shape[0],):
+        raise ValueError(f"Expected delay mask {(common.shape[0],)}, got {delay_mask.shape}")
+    frames = common.reshape(common.shape[0], -1, FRAME_SIZE)
+    delayed = frames.clone()
+    delayed[:, 1:, 0:6] = frames[:, :-1, 0:6]
+    delayed[:, 1:, 9:33] = frames[:, :-1, 9:33]
+    mask = delay_mask.to(device=common.device, dtype=torch.bool)[:, None, None]
+    return torch.where(mask, delayed, frames).reshape_as(common)

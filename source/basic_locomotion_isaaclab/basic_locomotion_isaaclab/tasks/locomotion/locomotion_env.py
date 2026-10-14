@@ -168,6 +168,17 @@ class LocomotionEnv(DirectRLEnv):
         # Ensure the order is consistent with the one expected in the cfg
         self._ids_joints_order = self._robot.find_joints(name_keys=self.cfg.desired_joints_order, preserve_order=True)[0]
 
+        self._policy_action_delay_max_steps = int(getattr(cfg, "policy_action_delay_max_steps", 0))
+        if self._policy_action_delay_max_steps < 0:
+            raise ValueError("policy_action_delay_max_steps must be non-negative")
+        default_targets = self._robot.data.default_joint_pos[:, self._ids_joints_order]
+        self._processed_action_history = default_targets.unsqueeze(0).repeat(
+            self._policy_action_delay_max_steps + 1, 1, 1
+        )
+        self._policy_action_delay_steps = torch.randint(
+            0, self._policy_action_delay_max_steps + 1, (self.num_envs,), device=self.device
+        )
+
         if getattr(self.cfg, "visualize_edge_map", False):
             self.set_debug_vis(True)
 
@@ -262,9 +273,22 @@ class LocomotionEnv(DirectRLEnv):
         if(self.cfg.use_filter_actions):
             alpha = 0.8
             temp = alpha * self._actions + (1 - alpha) * self._previous_actions
-            self._processed_actions = self.cfg.action_scale * temp + default_joint_pos_ordered
+            requested_targets = self.cfg.action_scale * temp + default_joint_pos_ordered
         else:
-            self._processed_actions = self.cfg.action_scale * self._actions + default_joint_pos_ordered
+            requested_targets = self.cfg.action_scale * self._actions + default_joint_pos_ordered
+
+        # Preserve the requested raw action in observations, while delaying only the
+        # position target that reaches the actuator. This matches the real controller,
+        # where previous_action is locally known even if transport/compute is delayed.
+        if self._policy_action_delay_max_steps > 0:
+            self._processed_action_history = torch.cat(
+                (self._processed_action_history[1:], requested_targets.unsqueeze(0)), dim=0
+            )
+            history_indices = self._policy_action_delay_max_steps - self._policy_action_delay_steps
+            env_indices = torch.arange(self.num_envs, device=self.device)
+            self._processed_actions = self._processed_action_history[history_indices, env_indices]
+        else:
+            self._processed_actions = requested_targets
 
 
     def _apply_action(self):
@@ -602,6 +626,12 @@ class LocomotionEnv(DirectRLEnv):
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
         self._previous_previous_actions[env_ids] = 0.0
+        if hasattr(self, "_processed_action_history"):
+            default_targets = self._robot.data.default_joint_pos[env_ids][:, self._ids_joints_order]
+            self._processed_action_history[:, env_ids] = default_targets.unsqueeze(0)
+            self._policy_action_delay_steps[env_ids] = torch.randint(
+                0, self._policy_action_delay_max_steps + 1, (len(env_ids),), device=self.device
+            )
         
         # Reset commands
         custom_events._get_new_random_commands(self, env_ids)
