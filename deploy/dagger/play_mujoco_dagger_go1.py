@@ -367,6 +367,10 @@ def _make_key_callback(ctl, command_a, fsm=False):
         elif keycode == 66:                      # B -> camera failure / recovery
             ctl["sensor_blind"] = not ctl.get("sensor_blind", False)
             print(f"[SENSOR] depth input {'ZERO' if ctl['sensor_blind'] else 'RESTORED'}", flush=True)
+        elif keycode == 70:                      # F -> freeze/unfreeze processed depth
+            ctl["depth_frozen"] = not ctl.get("depth_frozen", False)
+            ctl["frozen_depth"] = None
+            print(f"[SENSOR] depth input {'FROZEN' if ctl['depth_frozen'] else 'LIVE'}", flush=True)
         elif keycode == 78:                      # N -> proprio noise on/off
             ctl["proprio_noise"] = not ctl.get("proprio_noise", False)
             print(f"[SENSOR] proprio noise {'ON' if ctl['proprio_noise'] else 'OFF'}", flush=True)
@@ -411,7 +415,7 @@ def main():
     parser.add_argument("--viewer", action="store_true",
                         help="open an interactive mujoco viewer + live depth window (needs a display). "
                              "Keys: Up/Down=vx Left/Right=vy Q/E=wz (+-0.1/press), "
-                             "V=zero C=cruise B=toggle zero depth ESC=quit")
+                             "V=zero C=cruise B=toggle zero depth F=freeze depth ESC=quit")
     parser.add_argument("--cmd", default="0.0 0.0 0.0",
                         help="fixed velocity command 'vx vy wz' for headless runs (default 0 0 0); "
                              "with --viewer the keyboard overrides it")
@@ -653,6 +657,7 @@ def main():
     past_actions = np.zeros(model.nu, dtype=np.float32)
     ctl = {"vx": _vx, "vy": _vy, "wz": _wz,
            "proprio_noise": bool(args.proprio_noise),
+           "sensor_blind": False, "depth_frozen": False, "frozen_depth": None,
            "request": None, "rl_enabled": False}
     proprio_noise = None
     if not use_clock:
@@ -733,10 +738,11 @@ def main():
             print("[INFO] FSM viewer: 0=PASSIVE Space/Esc=DAMPING 1=STAND "
                   "2=SITDOWN 3=RL X=quit; Up/Down=vx Left/Right=vy Q/E=wz "
                   "V=zero C=cruise "
-                  "B=toggle zero depth N=toggle proprio noise.")
+                  "B=toggle zero depth F=freeze depth N=toggle proprio noise.")
         else:
             print("[INFO] viewer on: Up/Down=vx Left/Right=vy Q/E=wz V=zero "
-                  "C=cruise B=toggle zero depth N=toggle proprio noise ESC=quit.")
+                  "C=cruise B=toggle zero depth F=freeze depth "
+                  "N=toggle proprio noise ESC=quit.")
 
     # --- optional dual-pane video ---
     recording = not args.no_video
@@ -809,6 +815,8 @@ def main():
 
         if ctl.get("sensor_blind", False):
             depth_t = torch.zeros((1, 1, depth_h, depth_w), dtype=torch.float32, device=device)
+        elif ctl.get("depth_frozen", False) and ctl.get("frozen_depth") is not None:
+            depth_t = ctl["frozen_depth"]
         else:
             depth_t = _preprocess_depth(
                 cam.render(), blur_sigma, device, min_z=float(md.get("depth_min_z", 0.0)),
@@ -817,6 +825,10 @@ def main():
                 dropout_prob=(0.0 if args.no_depth_noise else
                               float(md.get("depth_sensor_noise", {}).get("dropout_prob", 0.0))),
             )
+            if ctl.get("depth_frozen", False):
+                # Freeze the complete post-processed actor input, including any
+                # configured blur/noise, rather than repeatedly reprocessing a raw frame.
+                ctl["frozen_depth"] = depth_t.clone()
         frame = depth_t.squeeze(0).squeeze(0).numpy().astype(np.float32)
         if deploy_core is not None:
             seq, common_array = deploy_core.prepare_policy_inputs(

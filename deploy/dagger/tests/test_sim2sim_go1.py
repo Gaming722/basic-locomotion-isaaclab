@@ -44,6 +44,13 @@ class Sim2SimTests(unittest.TestCase):
             self.assertTrue(ctl['sensor_blind'])
             callback(66)
             self.assertFalse(ctl['sensor_blind'])
+            callback(70)
+            self.assertTrue(ctl['depth_frozen'])
+            self.assertIsNone(ctl['frozen_depth'])
+            ctl['frozen_depth'] = object()
+            callback(70)
+            self.assertFalse(ctl['depth_frozen'])
+            self.assertIsNone(ctl['frozen_depth'])
 
     def test_realtime_deadline(self):
         with patch('play_mujoco_dagger_go1.time.perf_counter', return_value=10.005), \
