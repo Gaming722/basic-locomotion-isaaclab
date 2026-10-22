@@ -388,6 +388,28 @@ def _preprocess_depth(depth, blur_sigma, device, *, min_z=0.0,
                             additive_noise_std=additive_noise_std, dropout_prob=dropout_prob)
 
 
+def _load_fixed_depth(path, expected_shape):
+    """Load an actor-ready metric depth frame without applying preprocessing again."""
+    depth = np.load(os.path.abspath(os.path.expanduser(path)), allow_pickle=False)
+    if depth.shape != tuple(expected_shape):
+        raise ValueError(f"Fixed depth must have shape {tuple(expected_shape)}, got {depth.shape}")
+    if not np.issubdtype(depth.dtype, np.number) or not np.isfinite(depth).all():
+        raise ValueError("Fixed depth must contain only finite numeric values")
+    depth = np.asarray(depth, dtype=np.float32)
+    if depth.min() < 0.1 or depth.max() > 2.0:
+        raise ValueError("Fixed actor-ready depth must be within [0.1, 2.0] metres")
+    return depth
+
+
+def _close_cv_windows():
+    """Close HighGUI windows and pump one event so GTK removes them promptly."""
+    try:
+        cv2.destroyAllWindows()
+        cv2.waitKey(1)
+    except cv2.error:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run the GO1 DAgger depth student in MuJoCo (sim2sim).")
     parser.add_argument("--ckpt", required=True,
@@ -431,9 +453,14 @@ def main():
     parser.add_argument("--no_depth_noise", action="store_true",
                         help="disable stochastic depth additive/dropout noise while preserving "
                              "checkpoint blur, clipping, sampling and delay")
+    parser.add_argument("--fixed_depth_file",
+                        help="actor-ready HxW float .npy depth in metres; replaces the MuJoCo "
+                             "camera for the entire run without applying blur/noise again")
     parser.add_argument("--no_video", action="store_true", help="skip dual-pane mp4 recording")
     parser.add_argument("--video_stride", type=int, default=1,
                         help="record every Nth policy frame without changing simulation timing")
+    parser.add_argument("--trace_output",
+                        help="optional NPZ policy-step trace for sim/real diagnostics")
     parser.add_argument("--fsm", action="store_true",
                         help="run PASSIVE/DAMPING/STAND/SITDOWN/RL through the deployment FSM")
     parser.add_argument("--fsm_config", default=os.path.join(HERE, "fsm_sim_config.json"),
@@ -544,6 +571,12 @@ def main():
     if use_clock and args.proprio_noise:
         parser.error("--proprio_noise supports the current 45-dim observation frame, not legacy clock models")
     depth_h, depth_w = map(int, md.get('depth_image_size', (DEPTH_H, DEPTH_W)))
+    fixed_depth_t = None
+    if args.fixed_depth_file:
+        fixed_depth = _load_fixed_depth(args.fixed_depth_file, (depth_h, depth_w))
+        fixed_depth_t = torch.from_numpy(fixed_depth)[None, None]
+        print(f"[SENSOR] fixed actor-ready depth={os.path.abspath(os.path.expanduser(args.fixed_depth_file))} "
+              f"range=[{fixed_depth.min():.3f}, {fixed_depth.max():.3f}] m")
     net = DaggerNet(vec_size=md["common_obs_size"], output_size=md["action_size"],
                     depth_channels=md["depth_channels"]).to("cpu")
     net.load_state_dict(ckpt["model_state_dict"])
@@ -763,6 +796,7 @@ def main():
         os.makedirs(os.path.dirname(video_path), exist_ok=True)
 
     completed_steps = 0
+    trace_records = []
     # Start after settling and renderer/viewer setup, not at application launch.
     wall_start = time.perf_counter()
     sim_start = data.time
@@ -815,6 +849,8 @@ def main():
 
         if ctl.get("sensor_blind", False):
             depth_t = torch.zeros((1, 1, depth_h, depth_w), dtype=torch.float32, device=device)
+        elif fixed_depth_t is not None:
+            depth_t = fixed_depth_t
         elif ctl.get("depth_frozen", False) and ctl.get("frozen_depth") is not None:
             depth_t = ctl["frozen_depth"]
         else:
@@ -857,6 +893,11 @@ def main():
             d_gray = (255.0 * (1.0 - d_show)).astype(np.uint8)
             cv2.imshow("depth", cv2.resize(d_gray, (480, 280), interpolation=cv2.INTER_NEAREST))
             cv2.waitKey(1)
+            try:
+                if cv2.getWindowProperty("depth", cv2.WND_PROP_VISIBLE) < 1:
+                    ctl["quit"] = True
+            except cv2.error:
+                ctl["quit"] = True
 
         if recording and p % args.video_stride == 0:
             wq, xq, yq, zq = data.qpos[3:7]
@@ -922,6 +963,23 @@ def main():
             past_actions = actions.copy()
         elif fsm_result.mode == RL:
             target_pos = sdk_to_policy(fsm_result.q)
+
+        if args.trace_output and fsm_result is not None:
+            target_sdk = np.asarray(fsm_result.q, dtype=np.float32)
+            estimated_pd_tau = (np.asarray(fsm_result.kp, dtype=np.float32) *
+                                (target_sdk - sdk_q) -
+                                np.asarray(fsm_result.kd, dtype=np.float32) * sdk_dq)
+            trace_records.append(dict(
+                policy_step=np.int32(p), sim_time=np.float32(data.time - sim_start),
+                mode=fsm_result.mode, q_sdk=sdk_q.copy(), dq_sdk=sdk_dq.copy(),
+                quaternion_wxyz=np.asarray(quat, dtype=np.float32).copy(),
+                gyro_base=np.asarray(ang_vel_b, dtype=np.float32).copy(),
+                command=cmd.copy(), common=np.asarray(common_array, dtype=np.float32).copy(),
+                depth_sequence=seq[0, :, 0].numpy().astype(np.float32, copy=True),
+                raw_action=(np.asarray(actions, dtype=np.float32).copy()
+                            if actions is not None else np.full(12, np.nan, dtype=np.float32)),
+                target_sdk=target_sdk.copy(), target_delta=target_sdk - sdk_q,
+                estimated_pd_tau=estimated_pd_tau))
 
         for _ in range(policy_every):
             # actuator command delay: apply the target from `act_delay` physics steps ago
@@ -1017,9 +1075,18 @@ def main():
           f"base=({data.qpos[0]:.2f},{data.qpos[1]:.2f},{data.qpos[2]:.2f})")
     if machine:
         print("[FSM_METRICS] " + json.dumps(fsm_metrics, sort_keys=True))
+    if args.trace_output:
+        trace_path = os.path.abspath(os.path.expanduser(args.trace_output))
+        trace_dir = os.path.dirname(trace_path)
+        if trace_dir:
+            os.makedirs(trace_dir, exist_ok=True)
+        arrays = {name: np.asarray([record[name] for record in trace_records])
+                  for name in trace_records[0]} if trace_records else {}
+        np.savez_compressed(trace_path, **arrays)
+        print(f"[INFO] sim trace saved: {trace_path} samples={len(trace_records)}")
     if args.viewer:
         viewer.close()
-        cv2.destroyAllWindows()
+        _close_cv_windows()
     if writer is not None:
         writer.release()
         print(f"[INFO] dual-pane video saved: {video_path}")
@@ -1029,4 +1096,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[INFO] interrupted -> closing viewer windows")
+    finally:
+        _close_cv_windows()

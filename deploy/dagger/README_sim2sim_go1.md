@@ -86,6 +86,13 @@ conda run -n sim2sim python deploy/dagger/play_mujoco_dagger_go1.py \
   viewer 中实时切换。`--no_depth_noise` 只关闭随机 additive/dropout，仍保留 checkpoint
   中的深度 clip、blur、采样率与延迟，适合隔离本体噪声。可用四个
   `--proprio_*_amplitude` 参数覆盖半幅值，并用 `--proprio_noise_seed` 固定随机序列。
+- **真实固定深度注入**：`--fixed_depth_file frame.npy` 接受 actor 已就绪的
+  `60×106 float32` 米制深度，要求所有值位于 `[0.1, 2.0]`。该帧在整个运行中
+  替换 MuJoCo 相机并直接写入深度历史，不再次添加 blur/noise；`B` 仍可临时将其
+  覆盖为全零。灰度预览 PNG 不能作为此参数的输入。
+- **逐控制步诊断**：`--trace_output trace.npz` 保存 FSM 模式、q/dq、IMU、
+  common/depth history、raw action、关节目标和估算 PD 力矩，字段与真机 flight
+  recorder 对齐，用于定位只在物理闭环中出现的振动。
 - 键盘范围读取学生 checkpoint 的 `command_a`，缺失时告警并使用 ±(0.8,0.4,0.8)。巡航及 viewer 初始 `--cmd` 也限制在该范围内；headless 的显式 `--cmd` 保持不裁剪。
 - 默认录双窗视频到 `<ckpt目录>/videos/dagger_play/mj_sim2sim_go1_<checkpoint名>.mp4`；`--no_video` 跳过。
 

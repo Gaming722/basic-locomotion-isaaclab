@@ -16,12 +16,25 @@ import torch
 from play_mujoco_dagger_go1 import (build_go1_scene_xml, DaggerNet,
                                   D435_DEPTH_QUATERNION_ROS_WXYZ, CAM_POS, _sync_realtime,
                                   GO1_VELOCITY_LIMIT_SDK, _make_key_callback,
-                                  _parse_fsm_script)
+                                  _load_fixed_depth, _parse_fsm_script)
 from go1_state_machine import DAMPING, PASSIVE, RL, SITDOWN, STAND, StateMachine
 from mujoco_depth import MujocoDepthCamera
 
 
 class Sim2SimTests(unittest.TestCase):
+    def test_fixed_actor_ready_depth_validation(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'depth.npy'
+            expected = np.linspace(.1, 2., 60 * 106, dtype=np.float32).reshape(60, 106)
+            np.save(path, expected)
+            np.testing.assert_array_equal(_load_fixed_depth(path, (60, 106)), expected)
+            np.save(path, np.zeros((60, 106), dtype=np.float32))
+            with self.assertRaisesRegex(ValueError, r"\[0.1, 2.0\]"):
+                _load_fixed_depth(path, (60, 106))
+            np.save(path, np.ones((59, 106), dtype=np.float32))
+            with self.assertRaisesRegex(ValueError, "shape"):
+                _load_fixed_depth(path, (60, 106))
+
     def test_keyboard_training_limits(self):
         for amplitudes in ([.8, .4, .8], [.2, .1, .3]):
             ctl = dict(vx=0., vy=0., wz=0.)
