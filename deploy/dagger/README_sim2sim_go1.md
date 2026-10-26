@@ -81,7 +81,8 @@ conda run -n sim2sim python deploy/dagger/play_mujoco_dagger_go1.py \
 - 键盘：`Up/Down`=vx、`Left/Right`=vy、`Q/E`=wz（每次 ±0.1）、`V`=速度指令全零、`C`=巡航(0.4,0,0)、`B`=深度全零/恢复、`F`=冻结/恢复深度；普通模式 `ESC`=退出，FSM 模式 `X`=退出。`F` 缓存按键后首次取得的完整预处理深度（含 checkpoint 配置的 blur/noise）并持续送入历史缓冲，再按一次恢复实时帧。`B` 优先于冻结模式，开启时 actor 立即收到全零深度，后续历史帧也写零；恢复后若 `F` 仍开启则继续使用冻结帧。预览按原有近白远黑映射呈白色。全零是超出正常预处理分布的硬失能测试，不代表真实设备失效时的全部行为。
 - **本体噪声 A/B**：加 `--proprio_noise --no_depth_noise` 后，对
   `ang_vel/gravity/q/dq` 分别加入每控制步零均值均匀噪声
-  `Uniform(±0.05/±0.02/±0.01/±0.05)`，与 Extreme-Parkour 配置完全一致；
+  `Uniform(±0.5/±0.05/±0.03/±1.5)`，对应 `noise_level=1.0` 的当前蒸馏默认值；
+  重力向量加噪后重新归一化。student 不含线速度和 heightmap，不应用这两项噪声。
   其余 command 和 previous-action 保持不变；`N` 可在
   viewer 中实时切换。`--no_depth_noise` 只关闭随机 additive/dropout，仍保留 checkpoint
   中的深度 clip、blur、采样率与延迟，适合隔离本体噪声。可用四个

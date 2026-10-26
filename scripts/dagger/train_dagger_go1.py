@@ -106,13 +106,13 @@ parser.add_argument(
     "--disable_proprio_noise", action="store_true", default=False,
     help="Disable student-only proprioceptive noise during DAgger training. Evaluation is always noise-free.",
 )
-parser.add_argument("--proprio_gyro_noise_amplitude", type=float, default=0.05,
+parser.add_argument("--proprio_gyro_noise_amplitude", type=float, default=0.5,
                     help="Student angular-velocity uniform-noise half-range in rad/s.")
-parser.add_argument("--proprio_gravity_noise_amplitude", type=float, default=0.02,
+parser.add_argument("--proprio_gravity_noise_amplitude", type=float, default=0.05,
                     help="Student projected-gravity component uniform-noise half-range; vector is renormalized.")
-parser.add_argument("--proprio_joint_pos_noise_amplitude", type=float, default=0.01,
+parser.add_argument("--proprio_joint_pos_noise_amplitude", type=float, default=0.03,
                     help="Student joint-position uniform-noise half-range in rad.")
-parser.add_argument("--proprio_joint_vel_noise_amplitude", type=float, default=0.05,
+parser.add_argument("--proprio_joint_vel_noise_amplitude", type=float, default=1.5,
                     help="Student joint-velocity uniform-noise half-range in rad/s.")
 parser.add_argument(
     "--dagger_buffer_size",

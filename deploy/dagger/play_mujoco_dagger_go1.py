@@ -446,10 +446,10 @@ def main():
                              "used by noisy DAgger training; press N in the viewer to toggle")
     parser.add_argument("--proprio_noise_seed", type=int, default=0,
                         help="PyTorch RNG seed for reproducible proprioceptive noise (default: 0)")
-    parser.add_argument("--proprio_angular_velocity_amplitude", type=float, default=0.05)
-    parser.add_argument("--proprio_projected_gravity_amplitude", type=float, default=0.02)
-    parser.add_argument("--proprio_joint_position_amplitude", type=float, default=0.01)
-    parser.add_argument("--proprio_joint_velocity_amplitude", type=float, default=0.05)
+    parser.add_argument("--proprio_angular_velocity_amplitude", type=float, default=0.5)
+    parser.add_argument("--proprio_projected_gravity_amplitude", type=float, default=0.05)
+    parser.add_argument("--proprio_joint_position_amplitude", type=float, default=0.03)
+    parser.add_argument("--proprio_joint_velocity_amplitude", type=float, default=1.5)
     parser.add_argument("--no_depth_noise", action="store_true",
                         help="disable stochastic depth additive/dropout noise while preserving "
                              "checkpoint blur, clipping, sampling and delay")

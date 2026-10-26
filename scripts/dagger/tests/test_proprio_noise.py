@@ -14,12 +14,12 @@ from proprio_noise import (
 
 
 class ProprioNoiseTests(unittest.TestCase):
-    def test_defaults_match_extreme_parkour_uniform_half_ranges(self):
+    def test_defaults_match_requested_uniform_half_ranges(self):
         cfg = ProprioNoiseCfg()
-        self.assertEqual(cfg.angular_velocity_half_range, 0.05)
-        self.assertEqual(cfg.projected_gravity_half_range, 0.02)
-        self.assertEqual(cfg.joint_position_half_range, 0.01)
-        self.assertEqual(cfg.joint_velocity_half_range, 0.05)
+        self.assertEqual(cfg.angular_velocity_half_range, 0.5)
+        self.assertEqual(cfg.projected_gravity_half_range, 0.05)
+        self.assertEqual(cfg.joint_position_half_range, 0.03)
+        self.assertEqual(cfg.joint_velocity_half_range, 1.5)
 
     def test_only_sensor_terms_are_corrupted_and_gravity_remains_unit(self):
         torch.manual_seed(7)

@@ -23,14 +23,15 @@ JOINT_VELOCITY = slice(21, 33)
 class ProprioNoiseCfg:
     """Per-step zero-mean uniform white-noise half-ranges.
 
-    Defaults reproduce Extreme-Parkour's configured ranges exactly.
+    Half-ranges are in unscaled sensor units with noise_level=1.0.
+    Linear velocity and height measurements are absent from the student input.
     """
 
     distribution: str = "uniform"
-    angular_velocity_half_range: float = 0.05
-    projected_gravity_half_range: float = 0.02
-    joint_position_half_range: float = 0.01
-    joint_velocity_half_range: float = 0.05
+    angular_velocity_half_range: float = 0.5
+    projected_gravity_half_range: float = 0.05
+    joint_position_half_range: float = 0.03
+    joint_velocity_half_range: float = 1.5
 
     def validate(self) -> None:
         if self.distribution not in ("uniform", "gaussian"):
