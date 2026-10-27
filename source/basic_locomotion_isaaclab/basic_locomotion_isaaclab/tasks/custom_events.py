@@ -12,6 +12,8 @@ from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.envs.mdp.events import _randomize_prop_by_op
 
+from .command_curriculum import StopTransitionCurriculum
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
@@ -311,11 +313,34 @@ def _get_new_random_commands(self, env_ids: torch.Tensor | None = None):
         _mj_get_new_random_commands(self, env_ids)
         return
 
+    transition_ratio = float(getattr(self.cfg, "command_transition_ratio", 0.0))
+    curriculum = None
+    if transition_ratio > 0.0:
+        if not hasattr(self, "_stop_transition_curriculum"):
+            curriculum = StopTransitionCurriculum(
+                num_envs=self.num_envs,
+                device=self.device,
+                step_dt=self.step_dt,
+                fixed_zero_ratio=float(getattr(self.cfg, "fixed_command_zero_ratio", 0.0)),
+                transition_ratio=transition_ratio,
+                move_duration_s=tuple(getattr(self.cfg, "command_transition_move_duration_s", (2.0, 5.0))),
+                stop_duration_s=tuple(getattr(self.cfg, "command_transition_stop_duration_s", (2.0, 4.0))),
+            )
+            self._stop_transition_curriculum = curriculum
+        else:
+            curriculum = self._stop_transition_curriculum
+
     if env_ids is not None:
         self._commands[env_ids, :3] = _sample_random_commands(self, env_ids)
+        if curriculum is not None:
+            curriculum.reset(env_ids, self._commands)
+
+    normal = curriculum.normal if curriculum is not None else torch.ones(
+        self.num_envs, dtype=torch.bool, device=self.device
+    )
 
     # Change direction while moving
-    resample_time = self.episode_length_buf == self.max_episode_length - 400
+    resample_time = (self.episode_length_buf == self.max_episode_length - 400) & normal
     commands_resample = torch.zeros_like(self._commands).uniform_(-1.0, 1.0)
     commands_resample[:, :3] *= _get_command_scale(self)
     self._commands[:, :3] = self._commands[:, :3] * ~resample_time.unsqueeze(1).expand(-1, 3) + commands_resample * resample_time.unsqueeze(1).expand(-1, 3)
@@ -324,21 +349,24 @@ def _get_new_random_commands(self, env_ids: torch.Tensor | None = None):
     rest_time = torch.logical_and(
         self.episode_length_buf >= self.max_episode_length - 250,
         self.episode_length_buf < self.max_episode_length - 150
-    )
+    ) & normal
     self._commands[:, :3] *= ~rest_time.unsqueeze(1).expand(-1, 3)
 
     # Move again
-    resample_time_2 = self.episode_length_buf == self.max_episode_length - 150
+    resample_time_2 = (self.episode_length_buf == self.max_episode_length - 150) & normal
     commands_resample_2 = torch.zeros_like(self._commands).uniform_(-1.0, 1.0)
     commands_resample_2[:, :3] *= _get_command_scale(self)
     self._commands[:, :3] = self._commands[:, :3] * ~resample_time_2.unsqueeze(1).expand(-1, 3) + commands_resample_2 * resample_time_2.unsqueeze(1).expand(-1, 3)
 
     # Keep a subset of environments at zero command. DAgger student configs scale
     # this subset with num_envs to match the teacher's 500/4096 training ratio.
-    num_fixed_envs = get_num_fixed_command_envs(self.cfg, self.num_envs)
-    if num_fixed_envs > 0:
-        fixed_env_ids = torch.arange(num_fixed_envs, device=self.device)
-        self._commands[fixed_env_ids, :3] *= 0.0
+    if curriculum is not None:
+        curriculum.step(self._commands, lambda ids: _sample_random_commands(self, ids))
+    else:
+        num_fixed_envs = get_num_fixed_command_envs(self.cfg, self.num_envs)
+        if num_fixed_envs > 0:
+            fixed_env_ids = torch.arange(num_fixed_envs, device=self.device)
+            self._commands[fixed_env_ids, :3] *= 0.0
 
 
 def _mj_get_new_random_commands(self, env_ids: torch.Tensor | None = None):

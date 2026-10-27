@@ -1240,6 +1240,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "command_a": tuple(env_cfg.command_a),
         "fixed_command_zero_ratio": env_cfg.fixed_command_zero_ratio,
         "num_fixed_command_envs": num_fixed_command_envs,
+        "command_curriculum": {
+            "fixed_zero_assignment": "randomized_per_episode",
+            "fixed_zero_ratio": float(env_cfg.fixed_command_zero_ratio),
+            "transition_ratio": float(getattr(env_cfg, "command_transition_ratio", 0.0)),
+            "transition_move_duration_s": tuple(
+                getattr(env_cfg, "command_transition_move_duration_s", ())
+            ),
+            "transition_stop_duration_s": tuple(
+                getattr(env_cfg, "command_transition_stop_duration_s", ())
+            ),
+        },
         "dagger_amp": _use_cuda_amp(device),
         "dagger_train_micro_batch_size": args_cli.dagger_train_micro_batch_size,
         "dagger_inference_batch_size": args_cli.dagger_inference_batch_size,
@@ -1274,7 +1285,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         f"recent_fraction={args_cli.dagger_recent_fraction}, batch={args_cli.dagger_batch_size}, "
         f"train_micro_batch={args_cli.dagger_train_micro_batch_size}, "
         f"inference_batch={args_cli.dagger_inference_batch_size}, amp={_use_cuda_amp(device)}, "
-        f"command_a={env_cfg.command_a}, fixed_command_envs={num_fixed_command_envs})."
+        f"command_a={env_cfg.command_a}, fixed_command_envs={num_fixed_command_envs}, "
+        f"transition_envs={round(num_envs * float(getattr(env_cfg, 'command_transition_ratio', 0.0)))}, "
+        f"transition_move_s={getattr(env_cfg, 'command_transition_move_duration_s', None)}, "
+        f"transition_stop_s={getattr(env_cfg, 'command_transition_stop_duration_s', None)})."
     )
 
     # camera-follow setup for env 0 (video recording view)

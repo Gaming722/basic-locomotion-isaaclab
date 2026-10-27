@@ -825,9 +825,13 @@ class Go1RoughVisionTiledEnvCfg(Go1RoughVisionEnvCfg):
     use_lin_vel_obs = False       # student obs: no base_lin_vel (real robot has no odometry)
     emit_teacher_obs = True       # emit teacher_obs (sim base_lin_vel + heightmap) for the expert
     enforce_env_spacing = True    # one robot per sub-terrain so depth can't see neighbours
-    # Deployment always enters RL from a stationary stand. Deliberately oversample
-    # this safety-critical regime relative to the teacher's original 500/4096 mix.
-    fixed_command_zero_ratio = 0.30
+    # Match the teacher's permanent-standing fraction.  A separate randomized
+    # transition cohort repeatedly walks and stops; permanent-zero samples alone do
+    # not teach recovery from an active gait after the command is cleared.
+    fixed_command_zero_ratio = 500.0 / 4096.0
+    command_transition_ratio = 0.25
+    command_transition_move_duration_s = (2.0, 5.0)
+    command_transition_stop_duration_s = (2.0, 4.0)
     # Safer perceptive-locomotion commands for the depth student (vx, vy, yaw rate).
     command_a = [0.8, 0.4, 0.8]
     policy_action_delay_max_steps = 1
@@ -885,7 +889,10 @@ class Go1RoughVisionRayCasterEnvCfg(Go1RoughVisionEnvCfg):
     # ---- DAgger student flags (mirror Go1RoughVisionTiledEnvCfg) ----
     use_lin_vel_obs = False       # student obs: no base_lin_vel (real robot has no odometry)
     emit_teacher_obs = True       # emit teacher_obs (sim base_lin_vel + heightmap) for the expert
-    fixed_command_zero_ratio = 0.30
+    fixed_command_zero_ratio = 500.0 / 4096.0
+    command_transition_ratio = 0.25
+    command_transition_move_duration_s = (2.0, 5.0)
+    command_transition_stop_duration_s = (2.0, 4.0)
     command_a = [0.8, 0.4, 0.8]
     policy_action_delay_max_steps = 1
 

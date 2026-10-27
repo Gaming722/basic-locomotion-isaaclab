@@ -55,10 +55,13 @@ python scripts/dagger/train_dagger_go1.py \
 - **`--headless` is required** on a no-display server. The script uses
   `AppLauncher(args_cli)`, so `headless` comes from this CLI flag — without it the
   rendering kit tries to open a window and hangs.
-- The DAgger student deliberately assigns 30% of environments a standing command,
-  because deployment always enters RL from a stationary stand. With 1024 envs this
-  means envs 0-306 stand and envs 307+ move. `--follow_env` is automatically
-  clamped onto a moving env. The Tiled terrain is 46x46 sub-terrains (max 2116 envs).
+- The DAgger student assigns about `500/4096` environments a permanent zero command,
+  matching the teacher. The assignment is randomized on every episode reset instead
+  of being tied to leading environment/terrain indices. A separate 25% cohort cycles
+  through 2--5 seconds of motion and 2--4 seconds of exact zero command. Permanent
+  standing samples teach quiet stance; the transition cohort teaches the distinct
+  closed-loop recovery problem of stopping an active gait. The Tiled terrain is 46x46
+  sub-terrains (max 2116 envs).
 - The TiledCamera student env requires the rendering kit; the script forces
   `--enable_cameras`.
 
